@@ -257,18 +257,6 @@ Total 373 genes.
 #                         col = colprgn,
 #                         column_title = "Heatmap of all DEG")
 # dev.off()
-# 
-# # almost 1GB file
-# tiff("../output/4days/4days-0.1-Heatmap-of-DEG.tiff", width = 9, height = 12, units = "in", res = 1000)
-# ComplexHeatmap::Heatmap(heatmap,
-#                         cluster_rows = TRUE,
-#                         cluster_columns = FALSE,
-#                         column_names_gp = gpar(fontsize = 6),
-#                         row_names_gp = gpar(fontsize = 2,5),
-#                         col = colprgn,
-#                         column_title = "Heatmap of all DEG")
-# dev.off()
-
 ```
 
 
