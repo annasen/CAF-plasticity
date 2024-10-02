@@ -130,10 +130,6 @@ data.log.gather <- gather(data.log, Sample, Value)
 ##data.log
 ggplot(data.log.gather, aes(x=Sample, y=Value)) + geom_violin() + ggtitle("Violin plot of log data.counts") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 ggplot(data.log.gather, aes(x=Sample, y=Value)) + geom_boxplot(alpha=0.2) + ggtitle("Boxplot of log data.counts") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-
-#heatmap
-
-
 ```
 
 ## Gene annotation
@@ -183,70 +179,6 @@ metadata$sample <- NULL
 metadata
 ```
 
-## PCA
-Data were normalized with cpm() function, i.e. Counts per million. Tpm is more used, but it requires gene length as well. Cpm normalization might bcreate a bias in case of different gene lengths.
-Removing the outlier NS1.TGFb2d.
-```{r pca, message=FALSE, warning=FALSE}
-# Calculate the counts per million (CPM) and log-transform the data
-pcaData <- cpm(data.counts.final, log = TRUE)
-
-# Perform PCA on the transposed data (samples as rows, features as columns)
-pcaDatares <- prcomp(t(pcaData))
-
-# Create a data frame from the PCA results for plotting
-pca_df <- as.data.frame(pcaDatares$x)
-pca_df$sample <- rownames(pca_df)
-
-# Ensure the row names of the metadata correspond to the PCA samples
-metadata.pca <- metadata
-metadata.pca$sample <- rownames(metadata.pca)
-
-# Merge PCA results with metadata
-pca_df <- merge(pca_df, metadata.pca, by = "sample")
-
-# Create a custom ggplot for PCA
-ggplot(pca_df, aes(x = PC1, y = PC2, color = stimulation, label = sample)) +
-  geom_point(size = 3) +
-  geom_text_repel() +  # Add text labels for samples
-  labs(title = "PCA of all samples", x = "PC1", y = "PC2") +
-  theme_minimal() +
-  scale_color_brewer(palette = "Dark2") +  # Set color palette
-  theme(legend.title = element_text(size = 10), 
-        legend.text = element_text(size = 8))
-
-
-
-# run again without the NS1.TGFb4d outlier
-pcaData.minus <- pcaData[,-7]
-
-# Perform PCA on the transposed data (samples as rows, features as columns)
-pcaDatares <- prcomp(t(pcaData.minus))
-
-# Create a data frame from the PCA results for plotting
-pca_df <- as.data.frame(pcaDatares$x)
-pca_df$sample <- rownames(pca_df)
-
-# Ensure the row names of the metadata correspond to the PCA samples
-metadata.pca$sample <- rownames(metadata.pca)
-
-# Merge PCA results with metadata
-pca_df <- merge(pca_df, metadata.pca, by = "sample")
-
-# Create a custom ggplot for PCA
-ggplot(pca_df, aes(x = PC1, y = PC2, color = stimulation, label = sample)) +
-  geom_point(size = 3) +
-  geom_text_repel() +  # Add text labels for samples
-  labs(title = "PCA without the outlier to study better variance in PC1", x = "PC1", y = "PC2") +
-  theme_minimal() +
-  scale_color_brewer(palette = "Dark2") +  # Set color palette
-  theme(legend.title = element_text(size = 10), 
-        legend.text = element_text(size = 8))
-
-
-# remove the outlier NS1.TGFb2d
-metadata <- metadata[-7,]
-data.counts.final <- data.counts.final[,-7]
-```
 
 ## Sample distance plot without the outlier
 Run the actual DESeq() function (estimates size factors, dispersion and fits the negative binomial GLM) and run the variance stabilizing transformation vst().
@@ -298,46 +230,6 @@ pheatmap(sampleDistMatrix,
          clustering_distance_rows=sampleDists,
          clustering_distance_cols=sampleDists,
          col=colors)
-
-
-#boxplot of significant genes
-boxplot.counts <- as.data.frame(vsd.assay) %>% rownames_to_column("genes") %>% filter(genes %in% c("Acta2", "Tagln", "Col1a1", "Il6", "Lif", "Ccl2"))
-boxplot.data <- data.frame(samplename=colnames(boxplot.counts))
-boxplot.data <- boxplot.data[-1, , drop=FALSE] #complicated in [] because it went from df to character vector, drop will hinder that
-
-boxplot.df <- boxplot.counts %>%
-  pivot_longer(!genes, names_to = "samplename", values_to = "vsd") %>%
-  left_join(boxplot.data, by="samplename")
-boxplot.df$stimulation <- sub("^.{4}", "", boxplot.df$samplename)
-boxplot.df$stimulation <- ifelse(grepl("C", boxplot.df$stimulation), "ctrl", boxplot.df$stimulation)
-
-boxplot.genes <- c("Acta2", "Tagln", "Col1a1", "Il6", "Lif", "Ccl2")
-for (gene in boxplot.genes) {
-  boxplot <- boxplot.df %>% 
-    dplyr::filter(genes == gene) %>%
-    ggplot(aes(x=stimulation, y=vsd)) + 
-    geom_boxplot(aes(fill=stimulation)) +
-    geom_point() +
-    ggtitle(gene)
-  
-  print(boxplot)
-}
-
-# Normalize vsd values based on "ctrl"
-boxplot.df <- boxplot.df %>%
-  group_by(genes) %>%
-  mutate(vsd_norm = vsd - mean(vsd[stimulation == "ctrl"], na.rm = TRUE))
-
-for (gene in boxplot.genes) {
-  dotplot <- boxplot.df %>% 
-    dplyr::filter(genes == gene) %>%
-    ggplot(aes(x=stimulation, y=vsd_norm)) + 
-    geom_dotplot(binaxis = "y", stackdir = "center") +
-    ggtitle(gene) + 
-    theme_minimal()
-  
-  print(dotplot)
-}
 ```
 
 ### Heatmap of all DEG
@@ -400,10 +292,9 @@ Inside PROGENy, one can find gene signatures for 14 different pathways:
 - **WNT:** regulates organ morphogenesis during development and tissue repair.  
 ```{r progeny, warning=FALSE, message=FALSE}
 dds.as.df <- counts(dds, normalized=TRUE)
-#write.csv2(dds.as.df, "../output/dds.csv")
 colprgn = colorRampPalette(brewer.pal(9, "PRGn"))(255)
 
-#try on vsd data
+#vsd data
 vsd.as.df <- as.matrix(assay(vsd))
 progeny.scores <- progeny(vsd.as.df, scale = TRUE, organism = "Mouse", top = 100)
 progeny.vector <- as.vector(progeny.scores)
@@ -566,51 +457,15 @@ ComplexHeatmap::Heatmap(heatmap,
 dev.off()
 
 
-## PROGENY
-vsd.as.df <- as.matrix(assay(vsd))
-progeny.scores <- progeny(vsd.as.df, scale = TRUE, organism = "Mouse", top = 100)
-progeny.vector <- as.vector(progeny.scores)
-paletteLength <- 100
-
-progenyBreaks <- c(seq(min(progeny.vector), 0, 
-    length.out=ceiling(paletteLength/2) + 1),
-    seq(max(progeny.vector)/paletteLength, 
-    max(progeny.vector), 
-    length.out=floor(paletteLength/2)))
-
-pheatmap.plot <- pheatmap(t(progeny.scores),fontsize=14, 
-    fontsize_row = 10, fontsize_col = 10, 
-    color=colprgn, breaks = progenyBreaks, 
-    cluster_rows = TRUE, cluster_cols = FALSE,
-    main = "PROGENy (100)",
-    treeheight_col = 0,  border_color = NA)
-pheatmap.plot
-tiff("../output/4days/progeny-ctrl-vs-swaps.tiff", width = 8, height = 7, units = "in", res = 300)
-plot(pheatmap.plot)
-dev.off()
-
 ## GO condition per column dotplot
-# up/down plot
+
 TGFbswap <- res1
 IL1aswap <- res2
 TGFb <- res3
 mix <- res4
-# comparelist <- list(rownames(TGFb), rownames(mix), rownames(TGFbswap), rownames(IL1aswap))
-# names(comparelist)<-c("TGFb->IL1a","IL1a->TGFb", "TGFb", "mix")
-# cclust<-compareCluster(geneCluster = comparelist,
-#                fun = enrichGO,
-#                OrgDb= org.Mm.eg.db,
-#                keyType = "SYMBOL",
-#                ont= "BP",
-#                universe = data.counts.final)
-# cclust.simple <- simplify(cclust, cutoff = 0.7, by = "p.adjust", select_fun = min)
-# GO.BP.plot <- dotplot(cclust.simple, showCategory = 10, font.size = 10, title = "Biological processes")
-# GO.BP.plot
-# tiff("../output/4days/GO-BP-plot-ctrl-vs-swaps.tiff", width = 7, height = 9, units = "in", res = 300)
-# plot(GO.BP.plot)
-# dev.off()
 
 # GGPLOTS
+#data wrangling for compareCluster()
 TGFb$othergroup <- "TGFb"
 TGFb <- rownames_to_column(TGFb, "Entrez")
 mix$othergroup <- "mix"
@@ -627,24 +482,11 @@ df <- TGFb %>%
 
 #BP
 ccgo.bp <- compareCluster(Entrez~diff.expr.+othergroup, data = df, fun = "enrichGO", OrgDb = org.Mm.eg.db, keyType = "SYMBOL", ont="BP")
-# ccgo.plot <- dotplot(ccgo.bp, showCategory=3, font.size = 12, title = "Biological processes", x="diff.expr.") + facet_grid(~othergroup)
-# ccgo.plot
-# tiff("../output/4days/GO-BP-plot-ctrl-vs-swaps-sections-simple.tiff", width = 8, height = 12, units = "in", res = 300)
-# plot(ccgo.plot)
-# dev.off()
-
 #data wrangling and plotting with ggplot
 ccgo.bp.df <- as.data.frame(ccgo.bp) 
 
-
 #MF
 ccgo.mf <- compareCluster(Entrez~diff.expr.+othergroup, data = df, fun = "enrichGO", OrgDb = org.Mm.eg.db, keyType = "SYMBOL", ont="MF")
-# ccgo.plot <- dotplot(ccgo, showCategory=5, font.size = 12, title = "Molecular function", x="diff.expr.") + facet_grid(~othergroup)
-# ccgo.plot
-# tiff("../output/4days/GO-MF-plot-ctrl-vs-swaps-sections-simple.tiff", width = 8, height = 11, units = "in", res = 300)
-# plot(ccgo.plot)
-# dev.off()
-
 ccgo.mf.df <- as.data.frame(ccgo.mf) %>%
   filter(Description %in% c("protein-macromolecule adaptor activity", "glycosaminoglycan binding", "growth factor activity", "protein tyrosine kinase activator activity", "extracellular matrix structural constituent", "extracellular matrix structural constituent conferring compression resistance", "ATPase binding", "Wnt-protein binding", "proteoglycan binding", "cytokine activity", "chemokine activity", "chemokine receptor binding", "platelet-derived growth factor binding", "growth factor binding", "extracellular matrix structural constituent conferring tensile strength", "filamin binding", "MMP activity", "fibronectin binding", "integrin binding", "cell adhesion molecule binding", "collagen binding", "SMAD binding", "cytokine receptor binding"))
 
@@ -654,7 +496,6 @@ ccgo.mf.df.dec <- ccgo.mf.df %>%
   mutate(GeneRatioDec = as.numeric(numerator) / as.numeric(denominator)) %>%
   select(-numerator, -denominator) %>%
   mutate(othergroup = factor(othergroup, levels = c("TGFb", "mix", "TGFb->IL1a", "IL1a->TGFb")))
-
 
 #ggplot
 ccgo.mg.ggplot <- ggplot(
@@ -686,364 +527,9 @@ ccgo.mg.ggplot <- ggplot(
   xlab("Differential Expression") +
   ylab("GO Term")
 
-tiff("../output/4days/GO-MF-ggplot-ctrl-vs-swaps.tiff", width = 8, height = 9, units = "in", res = 300)
 ccgo.mg.ggplot
-dev.off()
-
 
 ```
-
-#### DEG: TGFb vs ctrl
-```{r TGFb vs ctrl 2, message=FALSE, warning=FALSE}
-res <- results(dds, contrast = c("stimulation", "TGFb", "ctrl"))
-res
-
-#explore results
-summary(res)
-colData(dds)
-
-
-# Volcano plot
-##add a column to df to specify UP- and DOWN-regulated genes
-res.df <- as.data.frame(res)
-res.df$diffexpressed <- "NO"
-res.df$diffexpressed[res.df$log2FoldChange > 0.6 & res.df$padj < 0.1] <- "UP"
-res.df$diffexpressed[res.df$log2FoldChange < -0.6 & res.df$padj < 0.1] <- "DOWN"
- 
-
-##volcano plot coloured according to UP- and DOWN-regulated genes
-ggplot(res.df, aes(x=log2FoldChange, y=-log10(padj), color=diffexpressed, label=rownames(res.df))) +
-  geom_point() +
-  geom_label_repel(data = subset(res.df), aes(label=rownames(res.df)) , max.overlaps = 20) +
-  geom_vline(xintercept = c(-0.6, 0.6), col="blue") +
-  geom_hline(yintercept = -log10(0.05), col="blue") +
-  scale_color_manual(values=c("maroon3", "navyblue", "seagreen2")) +
-  theme_minimal() #+ geom_label_repel(data = subset(res_as_df, rownames == "Fip1L1"), aes(label=rownames(res_as_df)))
-
-res.df$gene <- rownames(res.df)
-
-# Now create the plot
-ggplot(res.df, aes(x=log2FoldChange, y=-log10(padj), color=diffexpressed, label=gene)) +
-  geom_point() +
-  geom_label_repel(data = subset(res.df, gene %in% c("Il17", "Bmp1")), aes(label=gene), max.overlaps = 20) +
-  geom_vline(xintercept = c(-0.6, 0.6), col="blue") +
-  geom_hline(yintercept = -log10(0.05), col="blue") +
-  scale_color_manual(values=c("maroon3", "navyblue", "seagreen2")) +
-  theme_minimal()
-
-
-
-# GENE ONTOLOGY ENRICHMENT
-
-res.df.DEgenes <- subset(res.df, padj < 0.1 & abs(log2FoldChange) > log2(1.5))
-
-DEgenesGO <- enrichGO(gene = rownames(res.df.DEgenes),
-                      keyType = "SYMBOL",
-                      ont = "BP",
-                      OrgDb = org.Mm.eg.db)
-DEgenesGOTable <- as.data.frame(DEgenesGO)
-
-GO.genename <- AnnotationDbi::select(org.Mm.eg.db, keys = rownames(res.df.DEgenes), columns = c("GENENAME"), keytype = "SYMBOL")
-
-#data wrangling ow multiple entries GeneID followed by collapsing Description
-GO.selection <- data.frame(geneID = DEgenesGOTable$geneID, Description=DEgenesGOTable$Description) %>%
-  separate_rows(geneID, sep = "/") %>%
-  group_by(geneID) %>%
-  summarize(Description = paste(Description, collapse = "/"))
-
-#add genename and description to res.df.DEgenes
-res.df.DEgenes$Genename <- GO.genename$GENENAME
-res.df.DEgenes$Description <- NA
-GO.match <- match(rownames(res.df.DEgenes), GO.selection$geneID)
-res.df.DEgenes$Description[!is.na(GO.match)] <- GO.selection$Description[GO.match[!is.na(GO.match)]]
-
-write.csv2(res.df.DEgenes, "../output/DE/4days/4days_swap_TGFb_vs_ctrl.csv")
-
-# plots
-barplot(DEgenesGO, showCategory = 10)
-dotplot(DEgenesGO, showCategory = 10)
-
-# up/down plot
-up <- res.df.DEgenes %>% filter(diffexpressed == "UP")
-down <- res.df.DEgenes %>% filter(diffexpressed == "DOWN")
-comparelist <- list(rownames(up), rownames(down))
-names(comparelist)<-c("upregulated","downregulated")
-cclust<-compareCluster(geneCluster = comparelist,
-               fun = enrichGO,
-               OrgDb= org.Mm.eg.db,
-               keyType = "SYMBOL",
-               ont= "BP",
-               universe=data.counts.final)
-dotplot(cclust, showCategory = 6, font.size = 10)
-
-# # semantics
-# GO_ID <- DEgenesGOTable$ID[DEgenesGOTable$p.adjust < 0.05]
-# library(simplifyEnrichment)
-# simplifyGO(GO_ID)
-```
-
-#### DEG: ctrl vs TGFb->IL1a
-```{r ctrl vs TGFb->IL1a, message=FALSE, warning=FALSE}
-res <- results(dds, contrast = c("stimulation", "TGFb->IL1a", "ctrl"))
-res
-
-#explore results
-summary(res)
-colData(dds)
-
-
-# Volcano plot
-##add a column to df to specify UP- and DOWN-regulated genes
-res.df <- as.data.frame(res)
-res.df$diffexpressed <- "NO"
-res.df$diffexpressed[res.df$log2FoldChange > 0.6 & res.df$padj < 0.1] <- "UP"
-res.df$diffexpressed[res.df$log2FoldChange < -0.6 & res.df$padj < 0.1] <- "DOWN"
-
-
-##volcano plot coloured according to UP- and DOWN-regulated genes
-ggplot(res.df, aes(x=log2FoldChange, y=-log10(padj), color=diffexpressed, label=rownames(res.df))) +
-  geom_point() +
-  #geom_label_repel(data = subset(res.df), aes(label=rownames(res.df)) , max.overlaps = 20) +
-  geom_vline(xintercept = c(-0.6, 0.6), col="blue") +
-  geom_hline(yintercept = -log10(0.05), col="blue") +
-  scale_color_manual(values=c("maroon3", "navyblue", "seagreen2")) +
-  theme_minimal()
-
-res.df$gene <- rownames(res.df)
-
-# Now create the plot
-ggplot(res.df, aes(x=log2FoldChange, y=-log10(padj), color=diffexpressed, label=gene)) +
-  geom_point() +
-  geom_label_repel(data = subset(res.df, gene %in% c("Il17", "Bmp1")), aes(label=gene), max.overlaps = 20) +
-  geom_vline(xintercept = c(-0.6, 0.6), col="blue") +
-  geom_hline(yintercept = -log10(0.05), col="blue") +
-  scale_color_manual(values=c("maroon3", "navyblue", "seagreen2")) +
-  theme_minimal()
-
-# GENE ONTOLOGY ENRICHMENT
-
-res.df.DEgenes <- subset(res.df, padj < 0.1 & abs(log2FoldChange) > log2(1.5))
-
-DEgenesGO <- enrichGO(gene = rownames(res.df.DEgenes),
-                      keyType = "SYMBOL",
-                      ont = "BP",
-                      OrgDb = org.Mm.eg.db)
-DEgenesGOTable <- as.data.frame(DEgenesGO)
-
-GO.genename <- AnnotationDbi::select(org.Mm.eg.db, keys = rownames(res.df.DEgenes), columns = c("GENENAME"), keytype = "SYMBOL")
-
-#data wrangling ow multiple entries GeneID followed by collapsing Description
-GO.selection <- data.frame(geneID = DEgenesGOTable$geneID, Description=DEgenesGOTable$Description) %>%
-  separate_rows(geneID, sep = "/") %>%
-  group_by(geneID) %>%
-  summarize(Description = paste(Description, collapse = "/"))
-
-#add genename and description to res.df.DEgenes
-res.df.DEgenes$Genename <- GO.genename$GENENAME
-res.df.DEgenes$Description <- NA
-GO.match <- match(rownames(res.df.DEgenes), GO.selection$geneID)
-res.df.DEgenes$Description[!is.na(GO.match)] <- GO.selection$Description[GO.match[!is.na(GO.match)]]
-
-write.csv2(res.df.DEgenes, "../output/DE/4days/4days_swap_TGFbswap_vs_ctrl.csv")
-
-# plots
-barplot(DEgenesGO, showCategory = 10)
-dotplot(DEgenesGO, showCategory = 10)
-
-# up/down plot
-up <- res.df.DEgenes %>% filter(diffexpressed == "UP")
-down <- res.df.DEgenes %>% filter(diffexpressed == "DOWN")
-comparelist <- list(rownames(up), rownames(down))
-names(comparelist)<-c("upregulated","downregulated")
-cclust<-compareCluster(geneCluster = comparelist,
-               fun = enrichGO,
-               OrgDb= org.Mm.eg.db,
-               keyType = "SYMBOL",
-               ont= "BP",
-               universe=data.counts.final)
-dotplot(cclust, showCategory = 6, font.size = 10)
-
-# # semantics
-# GO_ID <- DEgenesGOTable$ID[DEgenesGOTable$p.adjust < 0.05]
-# library(simplifyEnrichment)
-# simplifyGO(GO_ID)
-```
-
-#### DEG: ctrl vs IL1a->TGFb
-```{r ctrl vs IL1a->TGFb, message=FALSE, warning=FALSE}
-res <- results(dds, contrast = c("stimulation", "IL1a->TGFb", "ctrl"))
-res
-
-#explore results
-summary(res)
-colData(dds)
-
-
-# Volcano plot
-##add a column to df to specify UP- and DOWN-regulated genes
-res.df <- as.data.frame(res)
-res.df$diffexpressed <- "NO"
-res.df$diffexpressed[res.df$log2FoldChange > 0.6 & res.df$padj < 0.1] <- "UP"
-res.df$diffexpressed[res.df$log2FoldChange < -0.6 & res.df$padj < 0.1] <- "DOWN"
-
-
-##volcano plot coloured according to UP- and DOWN-regulated genes
-ggplot(res.df, aes(x=log2FoldChange, y=-log10(padj), color=diffexpressed, label=rownames(res.df))) +
-  geom_point() +
-  geom_label_repel(data = subset(res.df), aes(label=rownames(res.df)) , max.overlaps = 20) +
-  geom_vline(xintercept = c(-0.6, 0.6), col="blue") +
-  geom_hline(yintercept = -log10(0.05), col="blue") +
-  scale_color_manual(values=c("maroon3", "navyblue", "seagreen2")) +
-  theme_minimal() #+ geom_label_repel(data = subset(res_as_df, rownames == "Fip1L1"), aes(label=rownames(res_as_df)))
-
-
-res.df$gene <- rownames(res.df)
-
-# Now create the plot
-ggplot(res.df, aes(x=log2FoldChange, y=-log10(padj), color=diffexpressed, label=gene)) +
-  geom_point() +
-  geom_label_repel(data = subset(res.df, gene %in% c("Il17", "Bmp1")), aes(label=gene), max.overlaps = 20) +
-  geom_vline(xintercept = c(-0.6, 0.6), col="blue") +
-  geom_hline(yintercept = -log10(0.05), col="blue") +
-  scale_color_manual(values=c("maroon3", "navyblue", "seagreen2")) +
-  theme_minimal()
-
-# GENE ONTOLOGY ENRICHMENT
-
-res.df.DEgenes <- subset(res.df, padj < 0.1 & abs(log2FoldChange) > log2(1.5))
-
-DEgenesGO <- enrichGO(gene = rownames(res.df.DEgenes),
-                      keyType = "SYMBOL",
-                      ont = "BP",
-                      OrgDb = org.Mm.eg.db)
-DEgenesGOTable <- as.data.frame(DEgenesGO)
-
-GO.genename <- AnnotationDbi::select(org.Mm.eg.db, keys = rownames(res.df.DEgenes), columns = c("GENENAME"), keytype = "SYMBOL")
-
-#data wrangling ow multiple entries GeneID followed by collapsing Description
-GO.selection <- data.frame(geneID = DEgenesGOTable$geneID, Description=DEgenesGOTable$Description) %>%
-  separate_rows(geneID, sep = "/") %>%
-  group_by(geneID) %>%
-  summarize(Description = paste(Description, collapse = "/"))
-
-#add genename and description to res.df.DEgenes
-res.df.DEgenes$Genename <- GO.genename$GENENAME
-res.df.DEgenes$Description <- NA
-GO.match <- match(rownames(res.df.DEgenes), GO.selection$geneID)
-res.df.DEgenes$Description[!is.na(GO.match)] <- GO.selection$Description[GO.match[!is.na(GO.match)]]
-
-write.csv2(res.df.DEgenes, "../output/DE/4days/4days_swap_ctrl_vs_IL1aswap.csv")
-
-# plots
-barplot(DEgenesGO, showCategory = 10)
-dotplot(DEgenesGO, showCategory = 10)
-
-# up/down plot
-up <- res.df.DEgenes %>% filter(diffexpressed == "UP")
-down <- res.df.DEgenes %>% filter(diffexpressed == "DOWN")
-comparelist <- list(rownames(up), rownames(down))
-names(comparelist)<-c("upregulated","downregulated")
-cclust<-compareCluster(geneCluster = comparelist,
-               fun = enrichGO,
-               OrgDb= org.Mm.eg.db,
-               keyType = "SYMBOL",
-               ont= "BP",
-               universe=data.counts.final)
-dotplot(cclust, showCategory = 6, font.size = 10)
-
-# # semantics
-# GO_ID <- DEgenesGOTable$ID[DEgenesGOTable$p.adjust < 0.05]
-# library(simplifyEnrichment)
-# simplifyGO(GO_ID)
-```
-
-#### DEG: ctrl vs mix
-```{r ctrl vs mix 2, message=FALSE, warning=FALSE}
-res <- results(dds, contrast = c("stimulation", "mix", "ctrl"))
-res
-
-#explore results
-summary(res)
-colData(dds)
-
-
-# Volcano plot
-##add a column to df to specify UP- and DOWN-regulated genes
-res.df <- as.data.frame(res)
-res.df$diffexpressed <- "NO"
-res.df$diffexpressed[res.df$log2FoldChange > 0.6 & res.df$padj < 0.1] <- "UP"
-res.df$diffexpressed[res.df$log2FoldChange < -0.6 & res.df$padj < 0.1] <- "DOWN"
-
-
-##volcano plot coloured according to UP- and DOWN-regulated genes
-ggplot(res.df, aes(x=log2FoldChange, y=-log10(padj), color=diffexpressed, label=rownames(res.df))) +
-  geom_point() +
-  geom_label_repel(data = subset(res.df), aes(label=rownames(res.df)) , max.overlaps = 20) +
-  geom_vline(xintercept = c(-0.6, 0.6), col="blue") +
-  geom_hline(yintercept = -log10(0.05), col="blue") +
-  scale_color_manual(values=c("maroon3", "navyblue", "seagreen2")) +
-  theme_minimal() #+ geom_label_repel(data = subset(res_as_df, rownames == "Fip1L1"), aes(label=rownames(res_as_df)))
-
-res.df$gene <- rownames(res.df)
-
-# Now create the plot
-ggplot(res.df, aes(x=log2FoldChange, y=-log10(padj), color=diffexpressed, label=gene)) +
-  geom_point() +
-  geom_label_repel(data = subset(res.df, gene %in% c("Il17", "Bmp1")), aes(label=gene), max.overlaps = 20) +
-  geom_vline(xintercept = c(-0.6, 0.6), col="blue") +
-  geom_hline(yintercept = -log10(0.05), col="blue") +
-  scale_color_manual(values=c("maroon3", "navyblue", "seagreen2")) +
-  theme_minimal()
-
-# GENE ONTOLOGY ENRICHMENT
-
-res.df.DEgenes <- subset(res.df, padj < 0.1 & abs(log2FoldChange) > log2(1.5))
-
-DEgenesGO <- enrichGO(gene = rownames(res.df.DEgenes),
-                      keyType = "SYMBOL",
-                      ont = "BP",
-                      OrgDb = org.Mm.eg.db)
-DEgenesGOTable <- as.data.frame(DEgenesGO)
-
-GO.genename <- AnnotationDbi::select(org.Mm.eg.db, keys = rownames(res.df.DEgenes), columns = c("GENENAME"), keytype = "SYMBOL")
-
-#data wrangling ow multiple entries GeneID followed by collapsing Description
-GO.selection <- data.frame(geneID = DEgenesGOTable$geneID, Description=DEgenesGOTable$Description) %>%
-  separate_rows(geneID, sep = "/") %>%
-  group_by(geneID) %>%
-  summarize(Description = paste(Description, collapse = "/"))
-
-#add genename and description to res.df.DEgenes
-res.df.DEgenes$Genename <- GO.genename$GENENAME
-res.df.DEgenes$Description <- NA
-GO.match <- match(rownames(res.df.DEgenes), GO.selection$geneID)
-res.df.DEgenes$Description[!is.na(GO.match)] <- GO.selection$Description[GO.match[!is.na(GO.match)]]
-
-write.csv2(res.df.DEgenes, "../output/DE/4days/4days_swap_ctrl_vs_mix.csv")
-
-# plots
-barplot(DEgenesGO, showCategory = 10)
-dotplot(DEgenesGO, showCategory = 10)
-
-# up/down plot
-up <- res.df.DEgenes %>% filter(diffexpressed == "UP")
-down <- res.df.DEgenes %>% filter(diffexpressed == "DOWN")
-comparelist <- list(rownames(up), rownames(down))
-names(comparelist)<-c("upregulated","downregulated")
-cclust<-compareCluster(geneCluster = comparelist,
-               fun = enrichGO,
-               OrgDb= org.Mm.eg.db,
-               keyType = "SYMBOL",
-               ont= "BP",
-               universe=data.counts.final)
-dotplot(cclust, showCategory = 6, font.size = 10)
-
-# # semantics
-# GO_ID <- DEgenesGOTable$ID[DEgenesGOTable$p.adjust < 0.05]
-# library(simplifyEnrichment)
-# simplifyGO(GO_ID)
-```
-
 
 # Session info
 ```{r sesison info}
