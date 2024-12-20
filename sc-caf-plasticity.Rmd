@@ -1,0 +1,668 @@
+---
+title: "Single-cell CAF plasticity"
+author: "AnnaJ"
+date: "Last edited `r format (Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+    toc_depth: 4
+    fig_path: figure-html/
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setseed}
+set.seed(123)
+```
+
+This Markdown document is a replication and a follow-up of Kurt Grech's script on the single-cell CAF plasticity <https://gitlab.cmbi.umcn.nl/kurtg/cafs_sc_analysis>. The data come from <https://www.nature.com/articles/s41588-020-0636-z#data-availability> and <https://www.nature.com/articles/s41422-019-0195-y> papers.
+
+myCAFs produce and remodel ECM, closer to cancer cells, induced by TGFb (SMAD2/3)
+myCAFs-like and iCAFs-like identified in arthritis and fibrosis  
+ - various combinations of cytokines IL1a and TGFb -> tissue remodeling into myCAFs or iCAFs  
+ - Fibroblasts activated by sequential IL1α-> TGFβ stimulation exhibited a different phenotype as compared to simultaneous (TGFβ+IL1α) and sequential (TGFβ->IL1α) fibroblast activation, demonstrating that the order of stimulation matters 
+
+Load the libraries
+```{r, results='hide', message=FALSE}
+library(Seurat)
+#library(dplyr)
+library(tidyverse)
+library(cowplot)
+library(ggplot2)
+library(patchwork)
+library(SeuratObject)
+library(SeuratDisk)
+library(SeuratData) #needed for loading h5?
+library(progeny)
+library(RColorBrewer) #progeny
+library(pheatmap) #progeny
+```
+
+# CRC data
+Colorectal carcinoma data, filtered out stromal cells.  
+There is also a distinction between tumor and normal cells.
+```{r crc preprocess, warning=FALSE}
+
+stromal_subset <- LoadSeuratRds("stromal_subset.Rds")
+
+#visualise tumor vs non-tumor
+p1 <- DimPlot(stromal_subset, group.by = "Subtype") | DimPlot(stromal_subset, group.by = "Class", cols = c("lightgrey","black"))
+p1
+
+#subset stromal cells into tumor and non-tumor
+Idents(stromal_subset) <- "Class"
+stromal_subset_tumor <- subset(stromal_subset, idents = "Tumor")
+stromal_subset_normal <- subset(stromal_subset, idents = "Normal")
+Idents(stromal_subset_normal) <- "Subtype"
+Idents(stromal_subset_tumor) <- "Subtype"
+
+```
+
+# PDAC dataset  
+Pancreatic ductal adenocarcinoma dataset, fibroblasts filtered followed by further CAFs celltypes specification:  
+Celltypes: complement secreting CAFs (csCAFs), iCAFs, myCAFs, quiescent pancreatic stellate cells (qPSCs), and smooth muscle pancreatic stellate cells (smPSCs).  
+There is also a distinction between tumor and normal cells.
+```{r map}
+
+pdac_fibro <- LoadSeuratRds("pdac_fibro_filt.Rds")
+
+#subset pdac cells into tumor and non-tumor
+pdac_fibro_T <- subset(pdac_fibro, subset = CONDITION == "T")
+pdac_fibro_N <- subset(pdac_fibro, subset = CONDITION == "N")
+
+
+
+CAFs <- LoadSeuratRds("CAFs.Rds")
+
+#Idents(pdac_fibro) <- "CONDITION"
+
+p1 <- DimPlot(pdac_fibro, group.by="predicted.id", reduction="tsne") + ggtitle(label = "PDAC-ID") |
+  DimPlot(pdac_fibro, group.by="CONDITION", reduction="tsne", cols = c("lightgrey", "black")) + 
+  ggtitle(label= "PDAC-Condition")
+p2 <- DimPlot(CAFs, group.by="predicted.id", reduction="tsne") + ggtitle(label = "CAFs-ID") |
+  DimPlot(CAFs, group.by="CONDITION", reduction="tsne", cols = c("lightgrey", "black")) + 
+  ggtitle(label= "CAFs-Condition")
+p1
+p2
+
+
+Idents(CAFs) <- "CONDITION"
+CAFs_T <- subset(CAFs, ident = "T")
+CAFs_T <- subset(CAFs_T, subset = predicted.id != "qPSC")
+CAFs_N <- subset(CAFs, ident = "N")
+
+```
+
+# Visualization {.tabset .tabset-fade .tabset-pills}  
+## Kurt's plots  
+```{r visualization, warning=FALSE, message=FALSE}
+
+#markers
+markers_ECM <- c("FN1", "COL1A1", "COL4A1", "COL4A2", "COL6A1", "COL6A2", 
+         "COL6A3","ELN", "LOX", "LOXL1", "ITGB1", "MMP1", "MMP2", "MMP9")
+key_markers <- c("FAP", "PDPN", "ACTA2", "TAGLN", "IL6", "CCL2", "LIF") 
+markers2 <- c("ACTA2", "TAGLN", "IL6", "CCL2", "LIF") 
+
+
+capitalize_first_letter <- function(x) {
+  sapply(x, function(y) paste0(toupper(substring(y, 1, 1)), tolower(substring(y, 2))))
+}
+
+
+#expression of ECM marker genes in tumor stromal cells and CAFs
+p1 <- DotPlot(stromal_subset_tumor, features=markers_ECM,cols = c("white", "#762A83"), scale = FALSE, 
+               group.by = "Subtype") + theme(legend.position = "right") +
+  theme(axis.text.x = element_blank(),  
+        axis.ticks.x = element_blank(),  
+        axis.title.x = element_blank(),
+        panel.border = element_blank(), 
+        axis.line.y = element_line(linewidth = 0.5),
+        axis.line.x = element_blank()) + 
+  ylab(label = "CRC") + ggtitle(label = "ECM markers (Tumor)")
+
+p2 <- DotPlot(CAFs_T, features=markers_ECM, cols = c("white", "#762A83"), scale = FALSE, 
+               group.by = "predicted.id") +
+  theme(legend.position = "none", legend.text = element_text(size = 10)) +
+  theme(legend.title = element_text(size = 12)) + 
+  theme(panel.border = element_blank(),  
+        axis.line.y = element_line(linewidth = 0.5),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 14, angle = 90, vjust = 0,3)) +  
+  ylab(label = "PDAC") + scale_x_discrete(labels = capitalize_first_letter(markers_ECM))
+p1/p2
+
+
+#expression of 5 marker genes in tumor stromal cells and CAFs
+p3 <- DotPlot(stromal_subset_tumor, features=markers2,cols = c("white", "#762A83"), 
+               scale = FALSE, group.by = "Subtype") + 
+  theme(legend.position = "right") + 
+  theme(panel.border = element_blank(),  
+        axis.line.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(), line = element_line()) +
+  ylab(label = "CRC") + ggtitle(label = "Fibroblast gene expression (Tumor)") 
+
+p4 <- DotPlot(CAFs_T, features=markers2, cols = c("white", "#762A83"), scale = FALSE, 
+               group.by = "predicted.id") + RotatedAxis() +
+  theme(legend.position = "none", legend.title = element_text(size = 10),legend.text = element_text(size = 10)) +
+  theme(legend.title = element_text(size = 12)) + 
+  ylab(label = "PDAC") + 
+  scale_x_discrete(labels = capitalize_first_letter(markers2))
+p3/p4
+
+
+
+
+#expression of ECM markers in PDAC
+
+DotPlot(pdac_fibro_N, features=markers_ECM, cols = c("white", "#1B7837"), scale = FALSE, 
+        group.by = "predicted.id") + RotatedAxis() + ggtitle(label = "PDAC Fibroblasts - ECM (Normal)")+ coord_flip() 
+DotPlot(pdac_fibro_T, features=markers_ECM, cols = c("white", "#762A83"), scale = FALSE, 
+          group.by = "predicted.id") + RotatedAxis() + ggtitle(label = "PDAC Fibroblasts - ECM (Tumor)")+ coord_flip()
+DotPlot(pdac_fibro_N, features=key_markers, cols = c("white", "#1B7837"), scale = FALSE, 
+        group.by = "predicted.id") + RotatedAxis() + ggtitle(label = "PDAC Fibroblasts - Key markers (Normal)") + coord_flip()
+DotPlot(pdac_fibro_T, features=key_markers, cols = c("white", "#762A83"), scale = FALSE, 
+          group.by = "predicted.id") + RotatedAxis() + ggtitle(label = "PDAC Fibroblasts - Key markers (Tumor)") + coord_flip()
+
+```
+
+## Marker genes stromal
+ - iCAF markers: Ccl2, IL6 and Lif (leukemia inhibitory factor), far away, promote inflammation, induced by TGFb+IL1a (JAK-STAT)   
+ - myCAFs markers: Acta2, Tagln.  
+ - Proteins periostin (Postn) - ECM component to promote tumor growth, asporin (Aspn), decorin (Dcn)
+ 
+```{r marker visualization stromal, warning=FALSE, message=FALSE}
+Idents(stromal_subset) <- "Subtype"
+# stromal.markers <- FindAllMarkers(stromal_subset, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+# stromal.markers %>%
+#   group_by(cluster) %>%
+#   slice_max(n = 2, order_by = avg_log2FC)
+# 
+Idents(CAFs) <- "predicted.id"
+# CAFs.markers <- FindAllMarkers(CAFs, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+# CAFs.markers %>%
+#   group_by(cluster) %>%
+#   slice_max(n = 2, order_by = avg_log2FC)
+
+paletteLength = 100
+colprgn = colorRampPalette(brewer.pal(9, "PRGn"))(paletteLength)
+
+greenandpurple <- c("#1B7837", "#762A83")
+greenandpurple <- c("#219143", "#9c38ad")
+greenandpurple <- c("#4dc471", "#ce4fe3")
+VlnPlot(stromal_subset_tumor, features = c("CCL2", "IL6", "LIF"), flip = TRUE, stack = TRUE) + ggtitle("iCAF markers in stromal tumor") + NoLegend()
+
+vln.mark.st <- VlnPlot(stromal_subset_tumor, features = c("POSTN", "ASPN", "DCN", "LOX", "LOXL1"), stack = TRUE, flip = TRUE) + ggtitle("Stromal tumor")  + NoLegend()
+vln.mark.st
+ggsave("output/vln.marker.stromal.png", vln.mark.st, width = 3.2, height = 6, units = "in", dpi = 300)
+
+VlnPlot(stromal_subset_tumor, features = c("ACTA2", "TAGLN"), flip = TRUE, stack = TRUE) + ggtitle("myCAF markers in stromal tumor") + NoLegend() 
+
+# Loop for the FeaturePlots and VlnPlots of the ECM marker genes
+markers3 <- c("POSTN", "ASPN", "DCN", "LOX", "LOXL1")
+
+plots <- list()
+for (marker in markers3) {
+  p1 <- FeaturePlot(stromal_subset_tumor, features = marker, 
+                      label = TRUE, repel = TRUE, reduction = "tsne") + 
+          scale_color_gradientn(colours = colprgn)
+  p2 <- VlnPlot(stromal_subset_tumor, features = marker, pt.size = 0) +
+      ggtitle(label = paste()) + NoLegend()
+  print(p1|p2)
+}
+
+paletteLength = 20
+colprgn = colorRampPalette(brewer.pal(9, "PRGn"))(paletteLength)
+
+vp2 <- VlnPlot(stromal_subset_tumor, features = c("ACTA2", "TAGLN", "CCL2", "IL6", "LIF", "POSTN", "ASPN", "DCN"), stack = TRUE, flip = TRUE, cols = rev( colprgn)) + ggtitle("CRC")  + NoLegend()
+tiff("output/Stacked-VlnPlot-stromal-markers-green.tiff", height = 6, width = 3, units = "in", res=300)
+plot(vp2)
+dev.off()
+vp2
+
+paletteLength = 100
+colprgn = colorRampPalette(brewer.pal(9, "PRGn"))(paletteLength)
+``` 
+ 
+## Marker genes CAFs
+ - iCAF markers: Ccl2, IL6 and Lif (leukemia inhibitory factor), far away, promote inflammation, induced by TGFb+IL1a (JAK-STAT)   
+ - myCAFs markers: Acta2, Tagln.  
+ - Proteins periostin (Postn) - ECM component to promote tumor growth, asporin (Aspn), decorin (Dcn)
+```{r marker CAFs visualization, warning=FALSE, message=FALSE}
+
+
+Idents(CAFs_T) <- "predicted.id"
+VlnPlot(CAFs_T, features = c("CCL2", "IL6", "LIF"), flip = TRUE, stack = TRUE) + ggtitle("iCAF markers in CAFs tumor")  + NoLegend()
+
+vln.mark.caf <- VlnPlot(CAFs_T, features = c("POSTN", "ASPN", "DCN", "LOX", "LOXL1"), flip = TRUE, stack = TRUE) + ggtitle("CAFs tumor")  + NoLegend()
+vln.mark.caf
+ggsave("output/vln.marker.CAFs.png", vln.mark.caf, width = 3.2, height = 6, units = "in", dpi = 300)
+
+VlnPlot(CAFs_T, features = c("ACTA2", "TAGLN"), flip = TRUE, stack = TRUE) + ggtitle("myCAF markers in CAFs tumor") + NoLegend()
+
+# Loop for the FeaturePlots and VlnPlots of the ECM marker genes
+markers3 <- c("POSTN", "ASPN", "DCN", "LOX", "LOXL1")
+
+plots <- list()
+for (marker in markers3) {
+  p1 <- FeaturePlot(CAFs_T, features = marker, 
+                      label = TRUE, repel = TRUE, reduction = "tsne") + 
+          scale_color_gradientn(colours = colprgn)
+  p2 <- VlnPlot(CAFs_T, features = marker, pt.size = 0) +
+      ggtitle(label = paste()) + NoLegend()
+  print(p1|p2)
+}
+
+
+paletteLength = 20
+colprgn = colorRampPalette(brewer.pal(9, "PRGn"))(paletteLength)
+
+vp2 <- VlnPlot(CAFs_T, features = c("ACTA2", "TAGLN", "CCL2", "IL6", "LIF", "POSTN", "ASPN", "DCN"), stack = TRUE, flip = TRUE, cols = rev( colprgn)) + ggtitle("CAFs")  + NoLegend()
+tiff("output/Stacked-VlnPlot-CAFs-markers-green.tiff", height = 6, width = 3, units = "in", res=300)
+plot(vp2)
+dev.off()
+vp2
+
+Idents(pdac_fibro_T) <- "predicted.id"
+vp2 <- VlnPlot(pdac_fibro_T, features = c("ACTA2", "TAGLN", "CCL2", "IL6", "LIF", "POSTN", "ASPN", "DCN"), stack = TRUE, flip = TRUE, cols = rev( colprgn)) + ggtitle("PDAC")  + NoLegend()
+tiff("output/Stacked-VlnPlot-PDAC-markers-green.tiff", height = 6, width = 4, units = "in", res=300)
+plot(vp2)
+dev.off()
+vp2
+
+paletteLength = 100
+colprgn = colorRampPalette(brewer.pal(9, "PRGn"))(paletteLength)
+```
+
+# PROGENy on tumor data {.tabset .tabset-fade .tabset-pills}  
+PROGENy (Pathway RespOnsive GENes) estimates the activity of relevant signaling pathways based on consensus gene signatures obtained from perturbation experiments, in other words, the footprint of the pathway on gene expression. 500 most responsive genes per pathway are used. Inside PROGENy, one can find gene signatures for 14 different pathways:  
+- Androgen: involved in the growth and development of the male reproductive organs.  
+- EGFR: regulates growth, survival, migration, apoptosis, proliferation, and differentiation in mammalian cells.  
+- Estrogen: promotes the growth and development of the female reproductive organs.  
+- Hypoxia: promotes angiogenesis and metabolic reprogramming when O2 levels are low.  
+- JAK-STAT: involved in immunity, cell division, cell death, and tumor formation.  
+- MAPK: integrates external signals and promotes cell growth and proliferation.  
+- NFkB: regulates immune response, cytokine production and cell survival.  
+- p53: regulates cell cycle, apoptosis, DNA repair and tumor suppression.  
+- PI3K: promotes growth and proliferation.  
+- TGFb: involved in development, homeostasis, and repair of most tissues.  
+- TNFa: mediates haematopoiesis, immune surveillance, tumour regression and protection from infection.  
+- Trail: induces apoptosis.  
+- VEGF: mediates angiogenesis, vascular permeability, and cell migration.  
+- WNT: regulates organ morphogenesis during development and tissue repair.  
+
+Number of cells:  
+ - stromal 1501  
+ - CAFs 5688  
+```{r progeny, message=FALSE, warning=FALSE}
+
+# stromal cells:
+## We compute the Progeny activity scores and add them to our Seurat object as a new assay called Progeny. 
+stromal_subset_tumor <- progeny(stromal_subset_tumor, scale=FALSE, organism="Human", top=500, perm=1, 
+    return_assay = TRUE)
+
+## We can now directly apply Seurat functions in our Progeny scores. 
+## For instance, we scale the pathway activity scores. 
+stromal_subset_tumor <- Seurat::ScaleData(stromal_subset_tumor, assay = "progeny") 
+
+## We transform Progeny scores into a data frame to better handling the results
+progeny.scores.stromal <- 
+    as.data.frame(t(GetAssayData(stromal_subset_tumor, slot = "scale.data", 
+        assay = "progeny"))) %>%
+    rownames_to_column("Cell") %>%
+    gather(Pathway, Activity, -Cell) 
+
+## We match Progeny scores with the cell clusters.
+annot <- read.delim(file = "GSE132465_GEO_processed_CRC_10X_cell_annotation.txt.gz", header = TRUE, row.names = 1)
+rownames(annot) <- gsub("-", ".", rownames(annot))
+annot <- annot %>% rownames_to_column("Cell")
+progeny.scores.stromal <- progeny.scores.stromal %>%
+  left_join(annot %>% select(Cell, Cell_subtype), by = "Cell")
+
+
+## We summarize the Progeny scores by cellpopulation
+summarized.progeny.stromal <- progeny.scores.stromal %>% 
+    group_by(Pathway, Cell_subtype) %>%
+    summarise(avg = mean(Activity), std = sd(Activity))
+
+
+
+
+# CAFs
+## We compute the Progeny activity scores and add them to our Seurat object as a new assay called Progeny.
+CAFs_T <- progeny(CAFs_T, scale=FALSE, organism="Human", top=500, perm=1, 
+    return_assay = TRUE)
+
+## We can now directly apply Seurat functions in our Progeny scores. 
+## For instance, we scale the pathway activity scores. 
+CAFs_T <- Seurat::ScaleData(CAFs_T, assay = "progeny") 
+
+## We transform Progeny scores into a data frame to better handling the results
+progeny.scores.CAFs <- 
+    as.data.frame(t(GetAssayData(CAFs_T, slot = "scale.data", 
+        assay = "progeny"))) %>%
+    rownames_to_column("Cell") %>%
+    gather(Pathway, Activity, -Cell)
+
+# progeny.scores.CAFs <- inner_join(progeny.scores.CAFs, "predicted.id")
+CAFs.predicted.id <- data.frame(Cell = rownames(CAFs@meta.data), predicted.id = CAFs@meta.data$predicted.id)
+progeny.scores.CAFs <- merge(progeny.scores.CAFs, CAFs.predicted.id, by = "Cell", all.x = TRUE)
+
+## We summarize the Progeny scores by cell population
+summarized.progeny.CAFs <- progeny.scores.CAFs %>% 
+    group_by(Pathway, predicted.id) %>%
+    summarise(avg = mean(Activity), std = sd(Activity))
+
+```
+
+## Heatmaps  
+
+``` {r progeny, heatmap, warning=FALSE}
+# stromal
+## We prepare the data for the plot
+summarized.progeny.stromal.df <- summarized.progeny.stromal %>%
+    dplyr::select(-std) %>%   
+    spread(Pathway, avg) %>%
+    data.frame(row.names = 1, check.names = FALSE, stringsAsFactors = FALSE) 
+
+
+progenyBreaks = c(seq(min(summarized.progeny.stromal.df), 0, 
+                      length.out=ceiling(paletteLength/2) + 1),
+                  seq(max(summarized.progeny.stromal.df)/paletteLength, 
+                      max(summarized.progeny.stromal.df), 
+                      length.out=floor(paletteLength/2)))
+progeny_hmap = pheatmap(t(summarized.progeny.stromal.df[,-1]),fontsize=14, 
+                        fontsize_row = 10, 
+                        color=colprgn, breaks = progenyBreaks, 
+                        main = "PROGENy Tumor stromal", angle_col = 45,
+                        treeheight_col = 0,  border_color = NA,
+                        #filename = "output/progeny_stromal.tiff",
+                        width = 4, height = 7, units = "in", res = 300)
+
+
+# CAFs
+## We prepare the data for the plot
+summarized.progeny.CAFs.df <- summarized.progeny.CAFs %>%
+    dplyr::select(-std) %>%   
+    spread(Pathway, avg) %>%
+    data.frame(row.names = 1, check.names = FALSE, stringsAsFactors = FALSE) 
+paletteLength = 100
+colprgn = colorRampPalette(brewer.pal(9, "PRGn"))(paletteLength)
+
+progenyBreaks = c(seq(min(summarized.progeny.CAFs.df), 0, 
+                      length.out=ceiling(paletteLength/2) + 1),
+                  seq(max(summarized.progeny.CAFs.df)/paletteLength, 
+                      max(summarized.progeny.CAFs.df), 
+                      length.out=floor(paletteLength/2)))
+progeny_hmap = pheatmap(t(summarized.progeny.CAFs.df[,-1]),fontsize=14, 
+                        fontsize_row = 10, 
+                        color=colprgn, breaks = progenyBreaks, 
+                        main = "PROGENy Tumor CAFs", angle_col = 45,
+                        treeheight_col = 0,  border_color = NA,
+                        #filename = "output/progeny_CAFs.tiff",
+                        width = 4, height = 7, units = "in", res = 300)
+
+```
+
+## stromal FeaturePlots with VlnPlots   
+```{r progeny stromal feature plots, warning=FALSE, message=FALSE}
+# add progeny data from slot assay to meta.data, they will be listed in colnames(meta.data) with pathways' names
+progeny.scores <- as.data.frame(t(GetAssayData(stromal_subset_tumor, assay = "progeny", slot = "scale.data")))
+stromal_subset_tumor@meta.data <- cbind(stromal_subset_tumor@meta.data, progeny.scores)
+
+
+# Loop through each pathway, calculate module score, and plot
+
+# Get unique pathways
+unique_pathways <- colnames(progeny.scores)
+
+for (i in seq_along(unique_pathways)) {
+  pathway <- unique_pathways[i]
+  
+  
+  # Plot the module score in FeaturePlots
+  feature_name <- paste0(pathway)  # don't add 1, only for Module scores
+  p1 <- FeaturePlot(stromal_subset_tumor, features = feature_name, label = TRUE, repel = TRUE, pt.size = 0.7) +
+      ggtitle(label = paste("Progeny: Pathway", pathway)) +
+      scale_color_gradientn(colours = brewer.pal(n = 11, name = "PRGn"))
+  
+  # Plot the VlnPlots
+  p2 <- VlnPlot(stromal_subset_tumor, features = feature_name, pt.size = 0) +
+      ggtitle(label = paste()) + NoLegend()
+print(p1 | p2)
+}
+
+
+```
+
+## CAFs FeaturePlots with VlnPlots  
+```{r progeny CAFs feature plots, warning=FALSE, message=FALSE}
+# move progeny data from slot assay to meta.data, they will be listed in colnames(meta.data) with pathways' names
+progeny.scores <- as.data.frame(t(GetAssayData(CAFs_T, assay = "progeny", slot = "scale.data")))
+
+CAFs_T@meta.data <- cbind(CAFs_T@meta.data, progeny.scores)
+
+Idents(CAFs_T) <- "predicted.id"
+for (i in seq_along(unique_pathways)) {
+  pathway <- unique_pathways[i]
+
+  # Plot the module score in FeaturePlots
+  feature_name <- paste0(pathway)  # don't add 1, only for Module scores
+  p1 <- FeaturePlot(CAFs_T, features = feature_name, label = TRUE, repel = TRUE, pt.size = 0.7, reduction = "tsne") +
+      ggtitle(label = paste("Progeny: Pathway", pathway)) +
+      scale_color_gradientn(colours = brewer.pal(n = 11, name = "PRGn"))
+  
+  # Plot the VlnPlots
+  p2 <- VlnPlot(CAFs_T, features = feature_name, pt.size = 0) +
+      ggtitle(label = paste()) + NoLegend()
+print(p1 | p2)
+}
+
+```
+  
+## CAFs FeaturePlots with VlnPlots subset  
+To check what the progeny data distribution looks like on 1501 cells (same as the stromal dataset).
+Plots resemble the bigger dataset, however, the violin plots can reflect the smaller number of cells in their shape.  
+```{r progeny subset CAFs feature plots, warning=FALSE, message=FALSE}
+# move progeny data from slot assay to meta.data, they will be listed in colnames(meta.data) with pathways' names
+CAFs_Tsubset <- subset(CAFs_T, cells = sample(Cells(CAFs_T), 1501))
+ncol(CAFs_Tsubset)
+
+for (i in seq_along(unique_pathways)) {
+  pathway <- unique_pathways[i]
+
+  # Plot the module score in FeaturePlots
+  feature_name <- paste0(pathway)  # don't add 1, only for Module scores
+  p1 <- FeaturePlot(CAFs_Tsubset, features = feature_name, label = TRUE, repel = TRUE, pt.size = 0.7, reduction = "tsne") +
+      ggtitle(label = paste("Progeny: Pathway", pathway)) +
+      scale_color_gradientn(colours = brewer.pal(n = 11, name = "PRGn"))
+  
+  # Plot the VlnPlots
+  p2 <- VlnPlot(CAFs_Tsubset, features = feature_name, pt.size = 0) +
+      ggtitle(label = paste()) + NoLegend()
+print(p1 | p2)
+}
+
+```
+
+## ggplots violin  
+```{r progeny plots gg, warning=FALSE}
+#get the genes from progeny database
+progeny.genes <- progeny::model_human_full
+progeny.genes.100 <- progeny.genes %>% group_by(pathway) %>% slice_min(order_by = p.value, n=100)
+
+# Get unique pathways
+unique_pathways <- unique(progeny.genes.100$pathway)
+
+
+
+ggplot(progeny.scores.stromal, 
+       aes(x = Cell_subtype, y = Activity, fill = Cell_subtype)) +
+  geom_violin(scale = "width", trim = TRUE) + #  controls the relative widths of the violins based on the number of data points in each group on the x-axis
+  geom_boxplot(width = 0.1, outlier.shape = NA, alpha = 0.5) +
+  theme_minimal() +
+  labs(x = "Predicted Cell Type", y = "Activity Score", 
+       title = "Stromal PROGENy Pathway Activity by Cell Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_brewer(palette = "Set3") +
+  facet_wrap(~ Pathway, scales = "free_y")
+
+ggplot(progeny.scores.CAFs, 
+       aes(x = predicted.id, y = Activity, fill = predicted.id)) +
+  geom_violin(scale = "width", trim = TRUE) + #  controls the relative widths of the violins based on the number of data points in each group on the x-axis
+  geom_boxplot(width = 0.1, outlier.shape = NA, alpha = 0.5) +
+  theme_minimal() +
+  labs(x = "Predicted Cell Type", y = "Activity Score", 
+       title = "CAFs PROGENy Pathway Activity by Cell Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_brewer(palette = "Set3") +
+  facet_wrap(~ Pathway, scales = "free_y")
+```
+
+## Stacked VlnPlot  
+```{r progeny plots, fig.width=4, fig.height=12, warning=FALSE}
+
+VlnPlot(stromal_subset_tumor, features = paste0(unique_pathways), assay = "progeny", pt.size = 0, stack = TRUE, flip = TRUE) + NoLegend() + ggtitle("Stromal PROGENy scores")
+
+Idents(CAFs_T) <- "predicted.id"
+VlnPlot(CAFs_T, features = paste0(unique_pathways), assay = "progeny", pt.size = 0, stack = TRUE, flip = TRUE) + NoLegend() + ggtitle("CAFs PROGENy scores")
+
+
+```
+
+## Stacked VlnPlot selected pathways  
+```{r progeny plots selection, fig.width=4, fig.height=7, warning=FALSE}
+
+vp1 <- VlnPlot(stromal_subset_tumor, features = c("JAK-STAT", "NFkB", "TNFa", "Hypoxia", "Estrogen", "PI3K", "TGFb", "EGFR", "MAPK"), assay = "progeny", pt.size = 0, stack = TRUE, flip = TRUE) + NoLegend() + ggtitle("Stromal PROGENy scores")
+tiff("output/Stacked-VlnPlot-stromal.tiff", height = 7, width = 4, units = "in", res=300)
+plot(vp1)
+dev.off()
+
+#Idents(CAFs_T) <- "predicted.id"
+vp2 <- VlnPlot(CAFs_T, features =  c("JAK-STAT", "NFkB", "TNFa", "Hypoxia", "Estrogen", "PI3K", "TGFb", "EGFR", "MAPK"), assay = "progeny", pt.size = 0, stack = TRUE, flip = TRUE) + NoLegend() + ggtitle("CAFs PROGENy scores")
+tiff("output/Stacked-VlnPlot-CAFs.tiff", height = 7, width = 4, units = "in", res=300)
+plot(vp2)
+dev.off()
+
+```
+
+# Module scores on 100 PROGENy defined genes per pathway  {.tabset .tabset-fade .tabset-pills}  
+The module scores represent the activity (expression level) of the PROGENy defined genes per pathway in each cell.  
+Each cell is represented by a score that quantifies the collective expression of the given set of genes.  
+A positive score would suggest that this set of genes is expressed in a particular cell more highly than would be expected, given the average expression of this module across the population.  
+Number of cells:  
+ - stromal 1501  
+ - CAFs 5688  
+```{r module scores, message=FALSE, warning=FALSE}
+
+
+# ms.100.androgen <- progeny.genes.100 %>% filter(pathway == "Androgen") %>% pull(gene) %>% as.character()
+# stromal_subset_tumor <- AddModuleScore(stromal_subset_tumor, features = list(ms.100.androgen), name = "androgen")
+# FeaturePlot(stromal_subset_tumor, features = "androgen1", label = TRUE, repel = TRUE) + scale_color_gradientn(colours = (brewer.pal(n = 11, name = "PRGn"))) 
+
+DimPlot(stromal_subset_tumor, group.by="Subtype", reduction="tsne", label = TRUE) + ggtitle(label = "stromal_tumor")
+table(stromal_subset_tumor@meta.data$Subtype)
+DimPlot(CAFs_T, group.by="predicted.id", reduction="tsne", label = TRUE) + ggtitle(label = "CAFs_tumor") 
+table(CAFs_T@meta.data$predicted.id)
+```
+
+## stromal FeaturePlots with VlnPlots  
+Stromal CRC dataset  
+Number of cells: 1501  
+```{r ms stromal, warning=FALSE, message=FALSE}
+
+
+# Loop through each pathway, calculate module score, and plot
+for (i in seq_along(unique_pathways)) {
+  pathway <- unique_pathways[i]
+  
+  # Extract genes for the current pathway
+  genes <- progeny.genes.100 %>%
+    filter(pathway == !!pathway) %>%
+    pull(gene) %>%
+    as.character()
+  
+  # Add module score for the current pathway, with a unique name
+  stromal_subset_tumor <- AddModuleScore(
+    stromal_subset_tumor,
+    features = list(genes),
+    name = paste0(pathway)
+  )
+  
+  # Plot the module score in FeaturePlots
+  feature_name <- paste0(pathway, "1")  # Seurat adds "1" to module score names
+  p1 <- FeaturePlot(stromal_subset_tumor, features = feature_name, label = TRUE, repel = TRUE, pt.size = 0.7) +
+      ggtitle(label = paste("MS: Pathway", pathway)) +
+      scale_color_gradientn(colours = brewer.pal(n = 11, name = "PRGn"))
+  
+  # Plot the VlnPlots
+  p2 <- VlnPlot(stromal_subset_tumor, features = feature_name, pt.size = 0) +
+      ggtitle(label = paste()) + NoLegend()
+print(p1 | p2)
+}
+```
+
+## Stromal stack VlnPlot  
+```{r str vln, fig.width=4, fig.height=12, warning=FALSE}
+
+VlnPlot(stromal_subset_tumor, features = paste0(unique_pathways, "1"), pt.size = 0, stack = TRUE, flip = TRUE) + NoLegend() + ggtitle("Stromal Module scores", subtitle = "Top 100 PROGENy genes per pathway")# + theme(aspect.ratio = 0.15)
+
+```
+
+
+## CAFs FeaturePlots with VlnPlots   
+PDAC dataset  
+Number of cells: 5688  
+```{r ms cafs, warning=FALSE, message=FALSE}
+Idents(CAFs_T) <- "predicted.id"
+
+# Get unique pathways
+unique_pathways <- unique(progeny.genes.100$pathway)
+
+# Loop through each pathway, calculate module score, and plot
+for (i in seq_along(unique_pathways)) {
+  pathway <- unique_pathways[i]
+  
+  # Extract genes for the current pathway
+  genes <- progeny.genes.100 %>%
+    filter(pathway == !!pathway) %>%
+    pull(gene) %>%
+    as.character()
+  
+  # Add module score for the current pathway, with a unique name
+  CAFs_T <- AddModuleScore(
+    CAFs_T,
+    features = list(genes),
+    name = paste0(pathway)
+  )
+  
+  # Plot the module score in FeaturePlots
+  feature_name <- paste0(pathway, "1")  # Seurat adds "1" to module score names
+  p1 <- FeaturePlot(CAFs_T, features = feature_name, label = TRUE, repel = TRUE, pt.size = 0.7, reduction = "tsne") +
+      ggtitle(label = paste("MS: Pathway", pathway)) +
+      scale_color_gradientn(colours = brewer.pal(n = 11, name = "PRGn"))
+  
+  # Plot the VlnPlots
+  p2 <- VlnPlot(CAFs_T, features = feature_name, pt.size = 0) +
+      ggtitle(label = paste()) + NoLegend()
+print(p1 | p2)
+}
+```
+
+## CAFs stack VlnPlot  
+```{r cafs vln, fig.width=4, fig.height=12, warning=FALSE}
+#png("output/ms-CAFs-vln.png", width = 320, height = 960)
+VlnPlot(CAFs_T, features = paste0(unique_pathways, "1"), pt.size = 0, stack = TRUE, flip = TRUE) + NoLegend() + ggtitle("CAFs Module scores", subtitle = "Top 100 PROGENy genes per pathway")
+
+#ggsave("output/ms-stromal-vln.png", plot = ms.caf.vln, width = 4, height = 12, dpi = 300)
+
+```
+
+
+

@@ -1,0 +1,729 @@
+---
+title: "sc-arthritis"
+author: "AnnaJ"
+date: "Last edited `r format (Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+    toc_depth: 4
+    fig_path: figure-html/
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setseed}
+set.seed(123)
+```
+
+The data come from <https://www.nature.com/articles/s41586-019-1263-7> paper on **Distinct fibroblast subsets drive inflammation and damage in arthritis** by Croft et al., 2019, Nature.  
+CD45− live synovial cells isolated from hind limbs of day 9 STIA inflamed mouse joints (n = 3 biological replicate samples, each consisted of cells isolated from the joints of three animals)
+
+# Load the libraries  
+```{r, results='hide', message=FALSE}
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(ggplot2)
+library(patchwork)
+library(SeuratObject)
+library(SeuratDisk)
+library(SeuratData) #needed for loading h5?
+library(progeny)
+library(RColorBrewer) #progeny
+library(pheatmap) #progeny
+library(ggrepel) #volcano plot
+library(kableExtra) #scrolling box
+library(clusterProfiler)
+library(org.Mm.eg.db)
+```
+
+# Load and process the arthritis data  
+Data available as GSE129087.  
+```{r data preprocess, message=FALSE, warning=FALSE}
+data.dir <- "rawdata/arthritis/"
+list.files(data.dir)
+expression.matrix <- Read10X(data.dir = data.dir)
+arthritis = CreateSeuratObject(counts = expression.matrix, project = "arthritis", min.cells = 3, min.features = 200)
+
+arthritis
+ncol(arthritis)
+
+arthritis[["percent.mt"]] <- PercentageFeatureSet(arthritis, pattern = "^mt-")
+
+# Visualize QC metrics
+VlnPlot(arthritis, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0)
+pf1 <- FeatureScatter(arthritis, feature1 = "nCount_RNA", feature2 = "percent.mt") + NoLegend()
+pf2 <- FeatureScatter(arthritis, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + NoLegend()
+pf1+pf2
+
+#in the paper, they did not filter out nFeatures < 2500, difference is 4338 or 853 cells
+arthritis <- subset(arthritis, subset = nFeature_RNA > 500 & percent.mt < 5)
+arthritis
+
+#look at the three replicates
+replicates <- gsub(".*-", "", colnames(arthritis))
+table(replicates)
+
+#downsample to common number 938
+downsampled.barcodes <- c()
+for (rep in unique(replicates)) {
+  replicate.barcodes <- colnames(arthritis)[replicates == rep]
+  sampled.barcodes <- sample(replicate.barcodes, size = min(938, length(replicate.barcodes)), replace = FALSE)
+  downsampled.barcodes <- c(downsampled.barcodes, sampled.barcodes)
+}
+arthritis <- subset(arthritis, cells = downsampled.barcodes)
+
+#Normalize the data
+arthritis <- NormalizeData(arthritis)
+
+#Find variable features
+arthritis <- FindVariableFeatures(arthritis, selection.method = "vst", nfeatures = 2000)
+top10 <- head(VariableFeatures(arthritis), 10)
+LabelPoints(plot = VariableFeaturePlot(arthritis), points = top10, repel = TRUE)
+
+#Scale data that the effects of total UMI counts and percentage of mitochondrial counts are regressed out, as in the paper, to remove unwanted source of variation
+#Note that for fibroblasts reanalysis they also regressed out the difference between G2M and S phase based on the expression of known cell-cycle marker genes
+arthritis <- ScaleData(arthritis, vars.to.regress = c("nCount_RNA", "percent.mt"))
+
+#Dimensional reductions
+arthritis <- RunPCA(arthritis) %>% FindNeighbors(dims = 1:30) %>% FindClusters(resolution = 0.6) %>% RunTSNE(dims = 1:30)
+DimPlot(arthritis, reduction = "tsne", group.by = "seurat_clusters", label = TRUE)
+arthritis <- RunUMAP(arthritis, dims = 1:30)
+DimPlot(arthritis, reduction = "umap", group.by = "seurat_clusters", label = TRUE)
+
+#See the clusters by replicates
+arthritis$replicate <- sub(".*-", "", colnames(arthritis))
+DimPlot(arthritis, reduction = "tsne", group.by = "replicate")
+DimPlot(arthritis, reduction = "umap", group.by = "replicate")
+```
+  
+# Cluster cell type assignment  
+The defined markers in the paper:  
+ - Fibroblasts:   
+  - Pan markers: Cd248, Cd34, Cdh11, Col1a1, Thy1, Pdgfra, Pdpn, Fap  
+  - Lining layer markers: Cd55, Clic5, Col22a1, Hbegf, Htra4, Tspan15  
+ - Pericytes: Acta2, Des, Flt1, Mcam, Notch3, Pdgfrb, Rgs5
+ - Osteoblasts: Alpl, Bglap, Bglap2, Omd, Runx2, Sp7, Ostn  
+ - Chondrocytes: Sox6, Cd14, Chad, Chadl, Cilp, Clu, Sox9, Matn3  
+ - Vascular cells:  Cdh5, Emcn, Pecam1  
+ - Erythrocytes: H2-Aa, H2-Ab1  
+ - Muscle cells:  Actn3, Aldoa, Tnnt3 
+ 
+ _ Cell cycle markers: Cdk1, Cenpa, Top2a
+```{r idents, message=FALSE, warning=FALSE}
+#cl 7
+VlnPlot(arthritis,features=c("Acta2", "Des", "Flt1", "Mcam", "Notch3", "Pdgfrb", "Rgs5"), pt.size = 0, stack=T, flip=T) + ggtitle("Pericytes") + NoLegend()
+
+#Cl 8
+VlnPlot(arthritis,features=c("Alpl", "Bglap", "Bglap2", "Omd", "Runx2", "Sp7", "Ostn"), pt.size = 0, stack=T, flip=T) + ggtitle("Osteoblasts") + NoLegend()
+
+#Cl 9?!!!!!, 10
+VlnPlot(arthritis,features=c("Sox6", "Cd14", "Chad", "Chadl", "Cilp", "Clu", "Sox9", "Matn3"), pt.size = 0, stack=T, flip=T) + ggtitle("Chondrocytes") + NoLegend()
+
+#Cl 3, 11
+VlnPlot(arthritis,features=c("Cdh5", "Emcn", "Pecam1"), pt.size = 0, stack=T, flip=T) + ggtitle("Vascular cells") + NoLegend()
+
+#Cl 12
+VlnPlot(arthritis,features=c("H2-Aa", "H2-Ab1"), pt.size = 0, stack=T, flip=T) + ggtitle("Erythrocytes") + NoLegend()
+
+#Cl 13
+VlnPlot(arthritis,features=c("Actn3", "Aldoa", "Tnnt3"), pt.size = 0, stack=T, flip=T) + ggtitle("Muscle cells") + NoLegend()
+
+#Cl 0, 1, 2, 4, 5
+VlnPlot(arthritis,features=c("Cd248", "Cd34", "Cdh11", "Col1a1", "Thy1", "Pdgfra", "Pdpn", "Fap", "Fn1"), pt.size = 0, stack=T, flip=T) + ggtitle("Fibroblasts Pan markers") + NoLegend()
+
+#Cl 6
+VlnPlot(arthritis,features=c("Cd55", "Clic5", "Col22a1", "Hbegf", "Htra4", "Tspan15"), pt.size = 0, stack=T, flip=T) + ggtitle("Fibroblasts Lining layer markers") + NoLegend()
+
+
+#replace the labels with true vectors corresponding the 0-14 order
+new.cluster.ids <- c("0_Fibroblasts", "1_Fibroblasts","2_Fibroblasts", "3_Vascular cells", "4_Fibroblasts", "5_Fibroblasts", "6_Fibroblasts-LL", "7_Pericytes", "8_Osteoblasts", "9_Chondrocytes", "10_Chondrocytes", "11_Vascular cells", "12_Erythrocytes", "13_Muscle cells")
+names(new.cluster.ids) <- levels(arthritis)
+arthritis <- RenameIdents(arthritis, new.cluster.ids)
+DimPlot(arthritis, reduction = "tsne", label = TRUE, pt.size = 0.5) + NoLegend()
+
+```
+
+
+# Fibroblasts reanalysis  
+downsample to common number or 575 cells per replicate (I have 584, total 1752 cells, Croft has 1725), regress out also the difference between G2M and S phase, clustering analysis resolution to 0.4 (list of S and G2/M markers are in Supplementary Table 1 of <https://doi.org/10.1038/nature20123> paper by Tirosh et al., 2016)  
+```{r fibroblasts, warning=FALSE, message=FALSE}
+fibroblasts <- subset(arthritis, idents = c("0_Fibroblasts", "1_Fibroblasts","2_Fibroblasts", "4_Fibroblasts", "5_Fibroblasts", "6_Fibroblasts-LL"))
+
+#look at the number of cells, Croft used 575 cells per replicate, I have 584
+replicates <- gsub(".*-", "", colnames(fibroblasts))
+table(replicates)
+
+#downsample to 584 cells per replicate
+downsampled.barcodes <- c()
+for (rep in unique(replicates)) {
+  replicate.barcodes <- colnames(fibroblasts)[replicates == rep]
+  sampled.barcodes <- sample(replicate.barcodes, size = min(584, length(replicate.barcodes)), replace = FALSE)
+  downsampled.barcodes <- c(downsampled.barcodes, sampled.barcodes)
+}
+fibroblasts <- subset(fibroblasts, cells = downsampled.barcodes)
+
+#Normalize the data and find variable features
+fibroblasts <- NormalizeData(fibroblasts) %>% FindVariableFeatures(selection.method = "vst", nfeatures = 2000) %>% ScaleData(vars.to.regress = c("nCount_RNA", "percent.mt")) %>% RunPCA(features = VariableFeatures(fibroblasts))
+print(fibroblasts[["pca"]], dims=1:10, nfeatures=10)
+
+#Scale data  and regress out total UMI counts, percentage of mitochondrial counts, and the difference between G2M and S phase 
+marker.s <- c("Mcm5", "Pcna", "Tyms", "Fen1", "Mcm2", "Mcm4", "Rrm1", "Ung", "Gins2", "Mcm6", "Cdca7", "Dtl", "Prim1", "Uhrf1", "Mlf1ip", "Hells", "Rfc2", "Rpa2", "Nasp", "Rad51ap1", "Gmnn", "Wdr76", "Slbp", "Ccne2", "Ubr7", "Pold3", "Msh2", "Atad2", "Rad51", "Rrm2", "Cdc45", "Cdc6", "Exo1", "Tipin", "Dscc1", "Blm", "Casp8ap2", "Usp1", "Clspn", "Pola1", "Chaf1b", "Brip1", "E2f8")
+markers.g2m <- c("Hmgb2", "Cdk1", "Nusap1", "Ube2c", "Birc5", "Tpx2", "Top2a", "Ndc80", "Cks2", "Nuf2", "Cks1b", "Mki67", "Tmpo", "Cenpf", "Tacc3", "Fam64a", "Smc4", "Ccnb2", "Ckap2l", "Ckap2", "Aurkb", "Bub1", "Kif11", "Anp32e", "Tubb4b", "Gtse1", "Kif20b", "Hjurp", "Hjurp", "Cdca3", "Hn1", "Cdc20", "Ttk", "Cdc25c", "Kif2c", "Rangap1", "Ncapd2", "Dlgap5", "Cdca2", "Cdca8", "Ect2", "Kif23", "Hmmer", "Aurka", "Psrc1", "Anln", "Lbr", "Ckap5", "Cenpe", "Ctcf", "Nek2", "G2e3", "Gas2l3", "Cbx5", "Cenpa")
+
+
+
+
+fibroblasts <- CellCycleScoring(fibroblasts, s.features = marker.s, g2m.features = markers.g2m, set.ident = TRUE)
+fibroblasts <- RunPCA(fibroblasts, features = c(marker.s, markers.g2m))
+DimPlot(fibroblasts, reduction = "pca") + ggtitle("PCA before regressing out cell cycle difference")
+DimPlot(fibroblasts, reduction = "umap") + ggtitle("UMAP before regressing out cell cycle difference")
+
+
+fibroblasts <- ScaleData(fibroblasts, vars.to.regress = c("nCount_RNA", "percent.mt", "S.Score", "G2M.Score"), features = rownames(fibroblasts)) #takes time
+
+fibroblasts <- RunPCA(fibroblasts, features = VariableFeatures(fibroblasts))
+print(fibroblasts[["pca"]], dims=1:10, nfeatures=10)
+DimPlot(fibroblasts, reduction = "pca") + ggtitle("PCA VariableFeatures after regressing out cell cycle difference")
+
+
+#Dimensional reductions
+fibroblasts <- FindNeighbors(fibroblasts, dims = 1:30) %>% FindClusters(resolution = 0.4) %>% RunTSNE(dims = 1:30)
+DimPlot(fibroblasts, reduction = "tsne", group.by = "seurat_clusters", label = TRUE)
+fibroblasts <- RunUMAP(fibroblasts, dims = 1:30)
+DimPlot(fibroblasts, reduction = "umap", group.by = "seurat_clusters", label = TRUE)
+
+# rename identities
+new.cluster.ids <- c("F1", "F2", "F3", "F4?", "F5")
+names(new.cluster.ids) <- levels(fibroblasts)
+fibroblasts <- RenameIdents(fibroblasts, new.cluster.ids)
+DimPlot(fibroblasts, reduction = "umap", label = TRUE)
+```
+
+# Finding marker genes  
+In the paper, it says: "Conserved cluster markers were identified as the intersection of those that were significant in separate tests of the cells from the each replicate (Wilcoxon test, Benjamini–Hochberg adjusted P <0.1). Only genes found in 10% of cells (either within or outside the cluster of interest) and that showed a minimum log fold difference of 0.25 were tested for differential expression."  
+And text below the figure 3d: "Expression of marker genes (x axes) in the identified STIA fibroblast clusters (y axes). Top left panels show expression of known fibroblast markers. The remaining sets of panels show examples of identified conserved makers genes for each fibroblast cluster F1–F5."  
+
+FindMarkers: a versatile tool for identifying marker genes that are differentially expressed between specified cell clusters or groups. It employs a Wilcoxon rank-sum test by default and allows users to customize parameters for significance and log-fold change thresholds. This function is suitable for a wide range of differential expression analysis scenarios in single-cell RNA-seq data, mainly for comparing two groups within one dataset.  
+
+FindAllMarkers: Similarly, it identifies marker genes across all clusters or groups in a Seurat object. It's useful for a comprehensive exploration of marker genes in the entire dataset. Users can specify the method (e.g., Wilcoxon rank-sum test or t-test) and customize parameters for statistical significance.  
+
+FindConservedMarkers: designed to identify markers that are conserved across different datasets or conditions. It helps users discover genes consistently differentially expressed across multiple experimental conditions. This function requires the definition of grouping variables to compare different conditions or datasets.  
+
+```{r find markers, warning=FALSE, message=FALSE}
+table(Idents(fibroblasts))
+
+# min.pct: default is 0.01, you could use 0.5 which is more stringent and will thus speed up the process
+
+cluster_ids <- unique(Idents(fibroblasts))
+markers.cons.list <- list()
+for (cluster in cluster_ids) {
+  markers.cons <- FindConservedMarkers(fibroblasts, ident.1 = as.character(cluster), grouping.var = "replicate", min.pct = 0.1,
+                                       logfc.threshold = 0.25)
+  markers.cons$cluster <- as.character(cluster)
+  markers.cons <- markers.cons %>% tibble::rownames_to_column("gene")
+  markers.cons.list[[as.character(cluster)]] <- markers.cons}
+
+markers.cons <- bind_rows(markers.cons.list)
+
+markers.cons <- markers.cons %>% mutate(avg_log2FC = (R1_avg_log2FC + R2_avg_log2FC + R3_avg_log2FC)/3)
+markers.cons %>%
+  group_by(cluster) %>%
+  slice_max(n = 5, order_by = avg_log2FC)
+
+markers.cons.f1 <- markers.cons %>% filter(cluster=="F1")
+markers.cons.f2 <- markers.cons %>% filter(cluster=="F2")
+markers.cons.f3 <- markers.cons %>% filter(cluster=="F3")
+markers.cons.f4 <- markers.cons %>% filter(cluster=="F4?")
+markers.cons.f5 <- markers.cons %>% filter(cluster=="F5")
+
+# run also Find(All)Markers with the replicate specification
+# the top markers differ, perhaps I should run this again in regards to the replicates
+# check whether it is ordered by log2fc or pval-adj
+markers.all <- FindAllMarkers(fibroblasts, only.pos = TRUE, logfc.threshold = 0.25, min.pct = 0.1)
+markers.all %>%
+  group_by(cluster) %>%
+  slice_max(n = 5, order_by = avg_log2FC)
+
+```
+
+
+# Visualization 
+```{r vis, warning=FALSE, message=FALSE}
+
+# fibroblast markers
+markers.fibroblasts <- VlnPlot(fibroblasts, features = c("Fap", "Pdpn", "Thy1"), stack = T, flip = T) + NoLegend()
+markers.f1 <- VlnPlot(fibroblasts, features = c("Sfrp2", "Col11a1", "Mfap4"), stack = T, flip = T) + NoLegend()
+markers.f2 <- VlnPlot(fibroblasts, features = c("Tnfaip6", "Inhba", "Prg4"), stack = T, flip = T) + NoLegend()
+markers.f3 <- VlnPlot(fibroblasts, features = c("Apod", "Clec3b", "Cd34"), stack = T, flip = T) + NoLegend()
+markers.f4 <- VlnPlot(fibroblasts, features = c("Top2a", "Hmgb2", "Cdk1"), stack = T, flip = T) + NoLegend()
+markers.f5 <- VlnPlot(fibroblasts, features = c("Clic5", "Col22a1", "Tspan15"), stack = T, flip = T) + NoLegend()
+
+combined_plot <- (markers.fibroblasts | markers.f1) / 
+                 (markers.f2 | markers.f3) / 
+                 (markers.f4 | markers.f5)
+combined_plot
+
+FeaturePlot(fibroblasts, features = c("Fap", "Pdpn", "Thy1"), label = TRUE, reduction = "tsne") 
+FeaturePlot(fibroblasts, features = c("Sfrp2", "Col11a1", "Mfap4"),label = TRUE, reduction = "tsne") 
+FeaturePlot(fibroblasts, features = c("Tnfaip6", "Inhba", "Prg4"), label = TRUE, reduction = "tsne")
+FeaturePlot(fibroblasts, features = c("Apod", "Clec3b", "Cd34"), label = TRUE, reduction = "tsne") 
+FeaturePlot(fibroblasts, features = c("Top2a", "Hmgb2", "Cdk1"), label = TRUE, reduction = "tsne") 
+FeaturePlot(fibroblasts, features = c("Clic5", "Col22a1", "Tspan15"), label = TRUE, reduction = "tsne") 
+
+
+VlnPlot(fibroblasts, features = c("Top2a", "Hmgb2", "Cdk1"), stack = T, flip = T) + NoLegend()
+
+# top markers found by FindConservedMarkers function
+VlnPlot(fibroblasts, features = c("Sfrp1", "Ddah1", "Emb", "Cpxm2", "Cdh11"), stack = T, flip = T) + NoLegend() + ggtitle("F1 conserved markers")
+VlnPlot(fibroblasts, features = c("Smoc2", "Apod", "Nt5dc2", "Pgr4", "Mfap4"), stack = T, flip = T) + NoLegend() + ggtitle("F2 conserved markers")
+VlnPlot(fibroblasts, features = c("Clec3b", "Apod", "Rarres2", "Gsn", "Abca8a"), stack = T, flip = T) + NoLegend() + ggtitle("F3 conserved markers")
+VlnPlot(fibroblasts, features = c("C1qtnf3", "Fth1", "Tspan2", "Col6a2", "Col6a1"), stack = T, flip = T) + NoLegend() + ggtitle("F4? conserved markers")
+VlnPlot(fibroblasts, features = c("Col22a1", "Rab37", "Clic5", "F13a1", "Tspan15"), stack = T, flip = T) + NoLegend() + ggtitle("F5 conserved markers")
+```
+## Visualization of marker genes
+```{r vis mar, warning=FALSE, message=FALSE}
+paletteLength = 20
+colprgn = colorRampPalette(brewer.pal(9, "PRGn"))(paletteLength)
+
+greenandpurple <- c("#1B7837", "#762A83")
+greenandpurple <- c("#219143", "#9c38ad")
+greenandpurple <- c("#4dc471", "#ce4fe3")
+vp1 <- VlnPlot(fibroblasts, features = c("Ccl2", "Il6", "Lif"), flip = TRUE, stack = TRUE) + ggtitle("iCAF markers in fibroblasts") + NoLegend()
+tiff("output/arthritis/Stacked-VlnPlot-iCAF.tiff", height = 5, width = 3, units = "in", res=300)
+plot(vp1)
+dev.off()
+vp1
+
+vp2 <- VlnPlot(fibroblasts, features = c("Acta2", "Tagln", "Ccl2", "Il6", "Lif", "Postn", "Aspn", "Dcn"), stack = TRUE, flip = TRUE, cols = rev( colprgn)) + ggtitle("RA")  + NoLegend()
+tiff("output/arthritis/Stacked-VlnPlot-markers-green.tiff", height = 6, width = 3, units = "in", res=300)
+plot(vp2)
+dev.off()
+vp2
+
+paletteLength = 100
+colprgn = colorRampPalette(brewer.pal(9, "PRGn"))(paletteLength)
+
+vp3 <- VlnPlot(fibroblasts, features = c("Acta2", "Tagln"), flip = TRUE, stack = TRUE) + ggtitle("myCAF markers in fibroblasts") + NoLegend() 
+tiff("output/arthritis/Stacked-VlnPlot-myCAF.tiff", height = 4, width = 4, units = "in", res=300)
+plot(vp3)
+dev.off()
+vp3
+
+# Loop for the FeaturePlots and VlnPlots of the ECM marker genes
+markers3 <- c("Postn", "Aspn", "Dcn", "Lox", "Loxl1")
+
+plots <- list()
+for (marker in markers3) {
+  p1 <- FeaturePlot(fibroblasts, features = marker, 
+                      label = TRUE, repel = TRUE, reduction = "tsne") + 
+          scale_color_gradientn(colours = colprgn)
+  p2 <- VlnPlot(fibroblasts, features = marker, pt.size = 0) +
+      ggtitle(label = paste()) + NoLegend()
+  print(p1|p2)
+}
+```
+
+
+ 
+# Gene ontology analysis {.tabset .tabset-fade .tabset-pills}  
+## F1 
+```{r go f1, warning=FALSE, message=FALSE}
+# Find differential expressed genes (DEG) for cluster F1
+deg.f1 <- markers.cons.f1
+deg.f1$diffexpressed <- "NO"
+deg.f1$diffexpressed[deg.f1$avg_log2FC > 0.5 & deg.f1$minimump_p_val < 0.05] <- "UP"
+deg.f1$diffexpressed[deg.f1$avg_log2FC < -0.5 & deg.f1$minimump_p_val < 0.05] <- "DOWN"
+
+ggplot(deg.f1, aes(x=avg_log2FC, y=-log10(minimump_p_val), color=diffexpressed, label=deg.f1$gene)) + 
+  geom_point() + 
+  geom_label_repel(data = subset(deg.f1), aes(label=deg.f1$gene) , max.overlaps = 20) + 
+  geom_vline(xintercept = c(-0.6, 0.6), col="blue") + 
+  geom_hline(yintercept = -log10(0.05), col="blue") + 
+  scale_color_manual(values=c("maroon3", "navyblue", "seagreen2")) + 
+  theme_minimal()
+
+
+# Filter for significant DEG, genes with a p-value adjusted below 0.05"
+  deg.filt.f1<-deg.f1 %>%
+            filter(minimump_p_val < 0.05)
+
+  # print(kable(deg.filt.f1, caption = paste0("<strong>Marker genes below 0.05 p-value in cluster F1</strong>")) %>%
+  # kable_styling(fixed_thead = T, bootstrap_options = c("striped"," hover")) %>%
+  # scroll_box(width = "750px", height = "350px")) %>%
+  # cat("\n")
+
+# GO analysis
+GO.f1 <- enrichGO(
+  gene = deg.filt.f1$gene,
+  OrgDb = org.Mm.eg.db,
+  keyType = "SYMBOL",
+  ont = "BP"
+  )
+dotplot(GO.f1, showCategory = 10, title = "F1")
+
+#up/down plot
+deg.f1up <- deg.f1 %>% filter(diffexpressed == "UP")
+deg.f1down <- deg.f1 %>% filter(diffexpressed == "DOWN")
+deg.f1comparelist <- list(deg.f1up$gene, deg.f1down$gene)
+names(deg.f1comparelist)<-c("upregulated","downregulated") 
+cclust<-compareCluster(geneCluster = deg.f1comparelist, 
+               fun = enrichGO,
+               OrgDb= org.Mm.eg.db,
+               keyType = "SYMBOL",
+               ont= "MF")
+dotplot(cclust, showCategory = 6, font.size = 10, title = "F1 molecular function")
+
+cclust<-compareCluster(geneCluster = deg.f1comparelist, 
+               fun = enrichGO,
+               OrgDb= org.Mm.eg.db,
+               keyType = "SYMBOL",
+               ont= "BP")
+dotplot(cclust, showCategory = 6, font.size = 10, title = "F1 biological processes")
+```
+  
+
+## F2 
+```{r go F2, warning=FALSE, message=FALSE}
+# Find differential expressed genes (DEG) for cluster F2
+deg.f2 <- markers.cons.f2
+deg.f2$diffexpressed <- "NO"
+deg.f2$diffexpressed[deg.f2$avg_log2FC > 0.5 & deg.f2$minimump_p_val < 0.05] <- "UP"
+deg.f2$diffexpressed[deg.f2$avg_log2FC < -0.5 & deg.f2$minimump_p_val < 0.05] <- "DOWN"
+
+ggplot(deg.f2, aes(x=avg_log2FC, y=-log10(minimump_p_val), color=diffexpressed, label=deg.f2$gene)) + 
+  geom_point() + 
+  geom_label_repel(data = subset(deg.f2), aes(label=deg.f2$gene) , max.overlaps = 20) + 
+  geom_vline(xintercept = c(-0.6, 0.6), col="blue") + 
+  geom_hline(yintercept = -log10(0.05), col="blue") + 
+  scale_color_manual(values=c("maroon3", "navyblue", "seagreen2")) + 
+  theme_minimal()
+
+
+# Filter for significant DEG, genes with a p-value adjusted below 0.05"
+  deg.filt.f2<-deg.f2 %>%
+            filter(minimump_p_val < 0.05)
+
+  # print(kable(deg.filt.f2, caption = paste0("<strong>Marker genes below 0.05 p-value in cluster F2</strong>")) %>%
+  # kable_styling(fixed_thead = T, bootstrap_options = c("striped"," hover")) %>%
+  # scroll_box(width = "750px", height = "350px")) %>%
+  # cat("\n")
+
+# GO analysis
+GO.f2 <- enrichGO(
+  gene = deg.filt.f2$gene,
+  OrgDb = org.Mm.eg.db,
+  keyType = "SYMBOL",
+  ont = "BP"
+  )
+dotplot(GO.f2, showCategory = 10, title = "F2")
+
+#up/down plot
+deg.f2up <- deg.f2 %>% filter(diffexpressed == "UP")
+deg.f2down <- deg.f2 %>% filter(diffexpressed == "DOWN")
+deg.f2comparelist <- list(deg.f2up$gene, deg.f2down$gene)
+names(deg.f2comparelist)<-c("upregulated","downregulated") 
+cclust<-compareCluster(geneCluster = deg.f2comparelist, 
+               fun = enrichGO,
+               OrgDb= org.Mm.eg.db,
+               keyType = "SYMBOL",
+               ont= "MF")
+dotplot(cclust, showCategory = 6, font.size = 10, title = "F2 molecular function")
+
+cclust<-compareCluster(geneCluster = deg.f2comparelist, 
+               fun = enrichGO,
+               OrgDb= org.Mm.eg.db,
+               keyType = "SYMBOL",
+               ont= "BP")
+dotplot(cclust, showCategory = 6, font.size = 10, title = "F2 biological processes")
+```
+
+## F3 
+```{r go f3, warning=FALSE, message=FALSE}
+# Find differential expressed genes (DEG) for cluster F3
+deg.f3 <- markers.cons.f3
+deg.f3$diffexpressed <- "NO"
+deg.f3$diffexpressed[deg.f3$avg_log2FC > 0.5 & deg.f3$minimump_p_val < 0.05] <- "UP"
+deg.f3$diffexpressed[deg.f3$avg_log2FC < -0.5 & deg.f3$minimump_p_val < 0.05] <- "DOWN"
+
+ggplot(deg.f3, aes(x=avg_log2FC, y=-log10(minimump_p_val), color=diffexpressed, label=deg.f3$gene)) + 
+  geom_point() + 
+  geom_label_repel(data = subset(deg.f3), aes(label=deg.f3$gene) , max.overlaps = 20) + 
+  geom_vline(xintercept = c(-0.6, 0.6), col="blue") + 
+  geom_hline(yintercept = -log10(0.05), col="blue") + 
+  scale_color_manual(values=c("maroon3", "navyblue", "seagreen2")) + 
+  theme_minimal()
+
+
+# Filter for significant DEG, genes with a p-value adjusted below 0.05"
+  deg.filt.f3<-deg.f3 %>%
+            filter(minimump_p_val < 0.05)
+
+  # print(kable(deg.filt.f3, caption = paste0("<strong>Marker genes below 0.05 p-value in cluster F3</strong>")) %>%
+  # kable_styling(fixed_thead = T, bootstrap_options = c("striped"," hover")) %>%
+  # scroll_box(width = "750px", height = "350px")) %>%
+  # cat("\n")
+
+# GO analysis
+GO.f3 <- enrichGO(
+  gene = deg.filt.f3$gene,
+  OrgDb = org.Mm.eg.db,
+  keyType = "SYMBOL",
+  ont = "BP"
+  )
+dotplot(GO.f3, showCategory = 10, title = "F3")
+
+#up/down plot
+deg.f3up <- deg.f3 %>% filter(diffexpressed == "UP")
+deg.f3down <- deg.f3 %>% filter(diffexpressed == "DOWN")
+deg.f3comparelist <- list(deg.f3up$gene, deg.f3down$gene)
+names(deg.f3comparelist)<-c("upregulated","downregulated") 
+cclust<-compareCluster(geneCluster = deg.f3comparelist, 
+               fun = enrichGO,
+               OrgDb= org.Mm.eg.db,
+               keyType = "SYMBOL",
+               ont= "MF")
+dotplot(cclust, showCategory = 6, font.size = 10, title = "F3 molecular function")
+
+cclust<-compareCluster(geneCluster = deg.f3comparelist, 
+               fun = enrichGO,
+               OrgDb= org.Mm.eg.db,
+               keyType = "SYMBOL",
+               ont= "BP")
+dotplot(cclust, showCategory = 6, font.size = 10, title = "F3 biological processes")
+```
+
+## F4 
+```{r go f4, warning=FALSE, message=FALSE}
+# Find differential expressed genes (DEG) for cluster F4
+deg.f4 <- markers.cons.f4
+deg.f4$diffexpressed <- "NO"
+deg.f4$diffexpressed[deg.f4$avg_log2FC > 0.5 & deg.f4$minimump_p_val < 0.05] <- "UP"
+deg.f4$diffexpressed[deg.f4$avg_log2FC < -0.5 & deg.f4$minimump_p_val < 0.05] <- "DOWN"
+
+ggplot(deg.f4, aes(x=avg_log2FC, y=-log10(minimump_p_val), color=diffexpressed, label=deg.f4$gene)) + 
+  geom_point() + 
+  geom_label_repel(data = subset(deg.f4), aes(label=deg.f4$gene) , max.overlaps = 20) + 
+  geom_vline(xintercept = c(-0.6, 0.6), col="blue") + 
+  geom_hline(yintercept = -log10(0.05), col="blue") + 
+  scale_color_manual(values=c("maroon3", "navyblue", "seagreen2")) + 
+  theme_minimal()
+
+
+# Filter for significant DEG, genes with a p-value adjusted below 0.05"
+  deg.filt.f4<-deg.f4 %>%
+            filter(minimump_p_val < 0.05)
+
+  # print(kable(deg.filt.f4, caption = paste0("<strong>Marker genes below 0.05 p-value in cluster F4</strong>")) %>%
+  # kable_styling(fixed_thead = T, bootstrap_options = c("striped"," hover")) %>%
+  # scroll_box(width = "750px", height = "350px")) %>%
+  # cat("\n")
+
+# GO analysis
+GO.f4 <- enrichGO(
+  gene = deg.filt.f4$gene,
+  OrgDb = org.Mm.eg.db,
+  keyType = "SYMBOL",
+  ont = "BP"
+  )
+dotplot(GO.f4, showCategory = 10, title = "F4")
+
+#up/down plot
+deg.f4up <- deg.f4 %>% filter(diffexpressed == "UP")
+deg.f4down <- deg.f4 %>% filter(diffexpressed == "DOWN")
+deg.f4comparelist <- list(deg.f4up$gene, deg.f4down$gene)
+names(deg.f4comparelist)<-c("upregulated","downregulated") 
+cclust<-compareCluster(geneCluster = deg.f4comparelist, 
+               fun = enrichGO,
+               OrgDb= org.Mm.eg.db,
+               keyType = "SYMBOL",
+               ont= "MF")
+dotplot(cclust, showCategory = 6, font.size = 10, title = "F4 molecular function")
+
+cclust<-compareCluster(geneCluster = deg.f4comparelist, 
+               fun = enrichGO,
+               OrgDb= org.Mm.eg.db,
+               keyType = "SYMBOL",
+               ont= "BP")
+dotplot(cclust, showCategory = 6, font.size = 10, title = "F4 biological processes")
+```
+
+## F5 
+```{r go f5, warning=FALSE, message=FALSE}
+# Find differential expressed genes (DEG) for cluster F5
+deg.f5 <- markers.cons.f5
+deg.f5$diffexpressed <- "NO"
+deg.f5$diffexpressed[deg.f5$avg_log2FC > 0.5 & deg.f5$minimump_p_val < 0.05] <- "UP"
+deg.f5$diffexpressed[deg.f5$avg_log2FC < -0.5 & deg.f5$minimump_p_val < 0.05] <- "DOWN"
+
+ggplot(deg.f5, aes(x=avg_log2FC, y=-log10(minimump_p_val), color=diffexpressed, label=deg.f5$gene)) + 
+  geom_point() + 
+  geom_label_repel(data = subset(deg.f5), aes(label=deg.f5$gene) , max.overlaps = 20) + 
+  geom_vline(xintercept = c(-0.6, 0.6), col="blue") + 
+  geom_hline(yintercept = -log10(0.05), col="blue") + 
+  scale_color_manual(values=c("maroon3", "navyblue", "seagreen2")) + 
+  theme_minimal()
+
+
+# Filter for significant DEG, genes with a p-value adjusted below 0.05"
+  deg.filt.f5<-deg.f5 %>%
+            filter(minimump_p_val < 0.05)
+
+  # print(kable(deg.filt.f5, caption = paste0("<strong>Marker genes below 0.05 p-value in cluster F5</strong>")) %>%
+  # kable_styling(fixed_thead = T, bootstrap_options = c("striped"," hover")) %>%
+  # scroll_box(width = "750px", height = "350px")) %>%
+  # cat("\n")
+
+# GO analysis
+GO.f5 <- enrichGO(
+  gene = deg.filt.f5$gene,
+  OrgDb = org.Mm.eg.db,
+  keyType = "SYMBOL",
+  ont = "BP"
+  )
+dotplot(GO.f5, showCategory = 10, title = "F5")
+
+#up/down plot
+deg.f5up <- deg.f5 %>% filter(diffexpressed == "UP")
+deg.f5down <- deg.f5 %>% filter(diffexpressed == "DOWN")
+deg.f5comparelist <- list(deg.f5up$gene, deg.f5down$gene)
+names(deg.f5comparelist)<-c("upregulated","downregulated") 
+cclust<-compareCluster(geneCluster = deg.f5comparelist, 
+               fun = enrichGO,
+               OrgDb= org.Mm.eg.db,
+               keyType = "SYMBOL",
+               ont= "MF")
+dotplot(cclust, showCategory = 6, font.size = 10, title = "F5 molecular function")
+
+cclust<-compareCluster(geneCluster = deg.f5comparelist, 
+               fun = enrichGO,
+               OrgDb= org.Mm.eg.db,
+               keyType = "SYMBOL",
+               ont= "BP")
+dotplot(cclust, showCategory = 6, font.size = 10, title = "F5 biological processes")
+```
+
+
+
+# Fibroblasts progeny  {.tabset .tabset-fade .tabset-pills}  
+PROGENy (Pathway RespOnsive GENes) estimates the activity of relevant signaling pathways based on consensus gene signatures obtained from perturbation experiments, in other words, the footprint of the pathway on gene expression. 500 most responsive genes per pathway are used. Inside PROGENy, one can find gene signatures for 14 different pathways:  
+- Androgen: involved in the growth and development of the male reproductive organs.  
+- EGFR: regulates growth, survival, migration, apoptosis, proliferation, and differentiation in mammalian cells.  
+- Estrogen: promotes the growth and development of the female reproductive organs.  
+- Hypoxia: promotes angiogenesis and metabolic reprogramming when O2 levels are low.  
+- JAK-STAT: involved in immunity, cell division, cell death, and tumor formation.  
+- MAPK: integrates external signals and promotes cell growth and proliferation.  
+- NFkB: regulates immune response, cytokine production and cell survival.  
+- p53: regulates cell cycle, apoptosis, DNA repair and tumor suppression.  
+- PI3K: promotes growth and proliferation.  
+- TGFb: involved in development, homeostasis, and repair of most tissues.  
+- TNFa: mediates haematopoiesis, immune surveillance, tumour regression and protection from infection.  
+- Trail: induces apoptosis.  
+- VEGF: mediates angiogenesis, vascular permeability, and cell migration.  
+- WNT: regulates organ morphogenesis during development and tissue repair.  
+
+
+Number of cells: 1752
+```{r fibro progeny, message=FALSE, warning=FALSE}
+
+paletteLength = 100
+colprgn = colorRampPalette(brewer.pal(9, "PRGn"))(paletteLength)
+
+
+## We compute the Progeny activity scores and add them to our Seurat object as a new assay called Progeny. 
+fibroblasts <- progeny(fibroblasts, scale=FALSE, organism="Mouse", top=500, perm=1, 
+    return_assay = TRUE)
+
+## We can now directly apply Seurat functions in our Progeny scores. 
+## For instance, we scale the pathway activity scores. 
+fibroblasts <- Seurat::ScaleData(fibroblasts, assay = "progeny") 
+
+## We transform Progeny scores into a data frame to better handling the results
+progeny.scores <- 
+    as.data.frame(t(GetAssayData(fibroblasts, slot = "scale.data", 
+        assay = "progeny"))) %>%
+    rownames_to_column("Cell") %>%
+    gather(Pathway, Activity, -Cell) 
+
+## We match Progeny scores with the cell clusters.
+fibroblasts$ident <- Idents(fibroblasts)
+cluster.metadata <- fibroblasts@meta.data %>% rownames_to_column(var="Cell") %>% dplyr::select(Cell, ident)
+progeny.scores <- progeny.scores %>% left_join(cluster.metadata, by = "Cell")
+
+## We summarize the Progeny scores by cellpopulation
+summarized.progeny <- progeny.scores %>% 
+    group_by(Pathway, ident) %>%
+    summarise(avg = mean(Activity), std = sd(Activity))
+```
+
+## Heatmap
+```{r progeny heatmap, message=FALSE, warning=FALSE}
+## We prepare the data for the plot
+summarized.progeny.df <- summarized.progeny %>%
+    dplyr::select(-std) %>%   
+    spread(Pathway, avg) %>%
+    data.frame(row.names = 1, check.names = FALSE, stringsAsFactors = FALSE) 
+
+
+progenyBreaks = c(seq(min(summarized.progeny.df), 0, 
+                      length.out=ceiling(paletteLength/2) + 1),
+                  seq(max(summarized.progeny.df)/paletteLength, 
+                      max(summarized.progeny.df), 
+                      length.out=floor(paletteLength/2)))
+progeny_hmap = pheatmap(t(summarized.progeny.df[,-1]),fontsize=14, 
+                        fontsize_row = 10, 
+                        color=colprgn, breaks = progenyBreaks, 
+                        main = "PROGENy arthritis", angle_col = 45,
+                        treeheight_col = 0,  border_color = NA,
+                        #filename = "output/arthritis/progeny.tiff",
+                        width = 4, height = 7, units = "in", res = 300)
+```
+
+## FeaturePlots with VlnPlots   
+```{r progeny feature plots, warning=FALSE, message=FALSE}
+# add progeny data from slot assay to meta.data, they will be listed in colnames(meta.data) with pathways' names
+progeny.scores <- as.data.frame(t(GetAssayData(fibroblasts, assay = "progeny", slot = "scale.data")))
+fibroblasts@meta.data <- cbind(fibroblasts@meta.data, progeny.scores)
+
+
+# Loop through each pathway, calculate module score, and plot
+
+# Get unique pathways
+unique_pathways <- colnames(progeny.scores)
+
+for (i in seq_along(unique_pathways)) {
+  pathway <- unique_pathways[i]
+  
+  
+  # Plot the module score in FeaturePlots
+  feature_name <- paste0(pathway)  # don't add 1, only for Module scores
+  p1 <- FeaturePlot(fibroblasts, features = feature_name, label = TRUE, repel = TRUE, pt.size = 0.7) +
+      ggtitle(label = paste("Progeny: Pathway", pathway)) +
+      scale_color_gradientn(colours = brewer.pal(n = 11, name = "PRGn"))
+  
+  # Plot the VlnPlots
+  p2 <- VlnPlot(fibroblasts, features = feature_name, pt.size = 0) +
+      ggtitle(label = paste()) + NoLegend()
+print(p1 | p2)
+}
+
+
+```
+
+## Stacked VlnPlot selected pathways  
+```{r progeny plots selection, fig.width=4, fig.height=7, warning=FALSE}
+
+vp1 <- VlnPlot(fibroblasts, features = c("TGFb", "EGFR", "MAPK",  "NFkB", "TNFa", "JAK-STAT", "PI3K", "Hypoxia", "Estrogen"), assay = "progeny", pt.size = 0, stack = TRUE, flip = TRUE) + NoLegend() + ggtitle("PROGENy scores")
+tiff("output/arthritis/Stacked-VlnPlot.tiff", height = 7, width = 4, units = "in", res=300)
+plot(vp1)
+dev.off()
+vp1
+
+```
+
+
